@@ -190,7 +190,7 @@ class CaptchaConfig(BaseModel):
 
     id: int = 1
     captcha_method: str = (
-        "yescaptcha"  # yescaptcha/captcharun/capsolver/ezcaptcha/browser/personal/remote_browser
+        "yescaptcha"  # yescaptcha/captcharun/twocaptcha/capsolver/ezcaptcha/browser/personal/remote_browser
     )
     yescaptcha_api_key: str = ""
     yescaptcha_base_url: str = "https://api.yescaptcha.com"
@@ -203,6 +203,8 @@ class CaptchaConfig(BaseModel):
     capsolver_base_url: str = "https://api.capsolver.com"
     captcharun_api_key: str = ""
     captcharun_base_url: str = "https://api.captcha-run.com"
+    twocaptcha_api_key: str = ""
+    twocaptcha_base_url: str = "https://api.2captcha.com"
     remote_browser_base_url: str = ""
     remote_browser_api_key: str = ""
     remote_browser_timeout: int = 60

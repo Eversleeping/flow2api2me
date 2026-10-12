@@ -714,6 +714,23 @@ class Config:
         self._config["captcha"]["captcharun_base_url"] = base_url
 
     @property
+    def twocaptcha_api_key(self) -> str:
+        return self._config.get("captcha", {}).get("twocaptcha_api_key", "")
+
+    def set_twocaptcha_api_key(self, api_key: str):
+        self._config.setdefault("captcha", {})["twocaptcha_api_key"] = api_key
+
+    @property
+    def twocaptcha_base_url(self) -> str:
+        return (
+            self._config.get("captcha", {}).get("twocaptcha_base_url")
+            or "https://api.2captcha.com"
+        )
+
+    def set_twocaptcha_base_url(self, base_url: str):
+        self._config.setdefault("captcha", {})["twocaptcha_base_url"] = base_url
+
+    @property
     def remote_browser_base_url(self) -> str:
         """Get remote browser captcha service base URL"""
         return self._config.get("captcha", {}).get("remote_browser_base_url", "")

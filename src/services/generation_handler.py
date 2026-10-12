@@ -2022,6 +2022,8 @@ class GenerationHandler:
             "yescaptcha",
             "capsolver",
             "captcharun",
+            "twocaptcha",
+            "2captcha",
             "capmonster",
             "ezcaptcha",
         )

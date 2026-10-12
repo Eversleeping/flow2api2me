@@ -4596,6 +4596,7 @@ class _FlowClientBase(FlowFrontendMixin):
             ("ezcaptcha", "ezcaptcha_api_key"),
             ("capsolver", "capsolver_api_key"),
             ("captcharun", "captcharun_api_key"),
+            ("twocaptcha", "twocaptcha_api_key"),
         ):
             if str(getattr(config, attr, "") or "").strip():
                 return method
@@ -4701,6 +4702,10 @@ class _FlowClientBase(FlowFrontendMixin):
             page_action = normalized_action
             task_type = "ReCaptchaV3"
             min_score = None
+        elif method == "twocaptcha":
+            page_action = normalized_action
+            task_type = "RecaptchaV3TaskProxyless"
+            min_score = 0.9
         else:
             page_action = normalized_action
             task_type = None
@@ -5343,6 +5348,7 @@ class _FlowClientBase(FlowFrontendMixin):
         elif captcha_method in [
             "yescaptcha",
             "captcharun",
+            "twocaptcha",
             "capmonster",
             "ezcaptcha",
             "capsolver",
@@ -5457,6 +5463,9 @@ class _FlowClientBase(FlowFrontendMixin):
         elif method == "captcharun":
             client_key = config.captcharun_api_key
             base_url = config.captcharun_base_url
+        elif method == "twocaptcha":
+            client_key = config.twocaptcha_api_key
+            base_url = config.twocaptcha_base_url
         else:
             debug_logger.log_error(f"[reCAPTCHA] Unknown API method: {method}")
             return None
@@ -5512,6 +5521,15 @@ class _FlowClientBase(FlowFrontendMixin):
                 or (self.get_request_fingerprint() or {}).get("user_agent")
                 or self._generate_user_agent(str(project_id or method))
             ).strip()
+            if method == "twocaptcha":
+                from .twocaptcha import solve_recaptcha_v3
+
+                solution = await solve_recaptcha_v3(
+                    client_key, website_url, website_key, page_action,
+                    enterprise=True, base_url=base_url,
+                    proxy_url=resolved_proxy_url or None,
+                )
+                return solution["gRecaptchaResponse"], solution["userAgent"]
             if method == "captcharun":
                 headers = {
                     "Authorization": f"Bearer {client_key}",

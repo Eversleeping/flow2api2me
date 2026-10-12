@@ -66,8 +66,9 @@
   - 注册 [YesCaptcha](https://yescaptcha.com/i/13Xd8K) 并获取 API Key，填入系统配置页面的 `YesCaptcha API 密钥`。
   - 注册 [CapSolver](https://dashboard.capsolver.com/passport/register?inviteCode=z95yVf1HvixI) 并获取 API Key，填入系统配置页面的 `CapSolver API 密钥`。
   - 注册 [Captcha.run](https://captcha.run/sso?inviter=36179602-dbd1-4227-8ec8-98f8c0170c59) 并获取 API Key，填入系统配置页面的 `Captcha.run API 密钥`。
+  - 注册 [2Captcha](https://2captcha.com/auth/register/?from=24953866) 并获取 API Key，填入系统配置页面的 `2Captcha API 密钥`。
 - YesCaptcha 支持在管理页切换 `type`：`RecaptchaV3TaskProxyless`、`RecaptchaV3TaskProxylessM1`、`RecaptchaV3TaskProxylessM1S7`、`RecaptchaV3TaskProxylessM1S9`；当前默认推荐 `M1S9`，S7/S9 会强制提交 `minScore` 0.7/0.9。
-- 默认 `docker-compose.yml` 建议搭配第三方打码（yescaptcha/captcharun/capmonster/ezcaptcha/capsolver）。
+- 默认 `docker-compose.yml` 建议搭配第三方打码（yescaptcha/captcharun/twocaptcha/capmonster/ezcaptcha/capsolver）。
 如需 Docker 内有头打码（browser/personal），请使用下方 `docker-compose.headed.yml`。
 
 - 自动推送新版 Flow 登录态的浏览器扩展：[Flow2API-Token-Updater](https://github.com/TheSmallHanCat/Flow2API-Token-Updater)。

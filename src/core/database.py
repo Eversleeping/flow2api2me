@@ -262,6 +262,8 @@ class Database:
             yescaptcha_api_key = ""
             yescaptcha_base_url = "https://api.yescaptcha.com"
             yescaptcha_task_type = DEFAULT_YESCAPTCHA_TASK_TYPE
+            twocaptcha_api_key = ""
+            twocaptcha_base_url = "https://api.2captcha.com"
             remote_browser_base_url = ""
             remote_browser_api_key = ""
             remote_browser_timeout = 60
@@ -280,6 +282,10 @@ class Database:
                 )
                 yescaptcha_task_type = normalize_yescaptcha_task_type(
                     captcha_config.get("yescaptcha_task_type")
+                )
+                twocaptcha_api_key = captcha_config.get("twocaptcha_api_key", "")
+                twocaptcha_base_url = captcha_config.get(
+                    "twocaptcha_base_url", "https://api.2captcha.com"
                 )
                 remote_browser_base_url = captcha_config.get(
                     "remote_browser_base_url", ""
@@ -344,9 +350,9 @@ class Database:
                     remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
                     browser_count, personal_project_pool_size,
                     personal_max_resident_tabs, browser_personal_fresh_restart_every_n_solves,
-                    personal_idle_tab_ttl_seconds
+                    personal_idle_tab_ttl_seconds, twocaptcha_api_key, twocaptcha_base_url
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                 captcha_method,
@@ -361,6 +367,8 @@ class Database:
                 personal_max_resident_tabs,
                 browser_personal_fresh_restart_every_n_solves,
                 personal_idle_tab_ttl_seconds,
+                twocaptcha_api_key,
+                twocaptcha_base_url,
                 ),
             )
 
@@ -459,6 +467,8 @@ class Database:
                         capsolver_base_url TEXT DEFAULT 'https://api.capsolver.com',
                         captcharun_api_key TEXT DEFAULT '',
                         captcharun_base_url TEXT DEFAULT 'https://api.captcha-run.com',
+                        twocaptcha_api_key TEXT DEFAULT '',
+                        twocaptcha_base_url TEXT DEFAULT 'https://api.2captcha.com',
                         remote_browser_base_url TEXT DEFAULT '',
                         remote_browser_api_key TEXT DEFAULT '',
                         remote_browser_timeout INTEGER DEFAULT 60,
@@ -609,6 +619,8 @@ class Database:
                     ("ezcaptcha_base_url", "TEXT DEFAULT 'https://api.ez-captcha.com'"),
                     ("capsolver_api_key", "TEXT DEFAULT ''"),
                     ("capsolver_base_url", "TEXT DEFAULT 'https://api.capsolver.com'"),
+                    ("twocaptcha_api_key", "TEXT DEFAULT ''"),
+                    ("twocaptcha_base_url", "TEXT DEFAULT 'https://api.2captcha.com'"),
                     ("captcharun_api_key", "TEXT DEFAULT ''"),
                     (
                         "captcharun_base_url",
@@ -923,6 +935,8 @@ class Database:
                     capsolver_base_url TEXT DEFAULT 'https://api.capsolver.com',
                     captcharun_api_key TEXT DEFAULT '',
                     captcharun_base_url TEXT DEFAULT 'https://api.captcha-run.com',
+                    twocaptcha_api_key TEXT DEFAULT '',
+                    twocaptcha_base_url TEXT DEFAULT 'https://api.2captcha.com',
                     remote_browser_base_url TEXT DEFAULT '',
                     remote_browser_api_key TEXT DEFAULT '',
                     remote_browser_timeout INTEGER DEFAULT 60,
@@ -2088,6 +2102,8 @@ class Database:
             config.set_capsolver_base_url(captcha_config.capsolver_base_url)
             config.set_captcharun_api_key(captcha_config.captcharun_api_key)
             config.set_captcharun_base_url(captcha_config.captcharun_base_url)
+            config.set_twocaptcha_api_key(captcha_config.twocaptcha_api_key)
+            config.set_twocaptcha_base_url(captcha_config.twocaptcha_base_url)
             config.set_remote_browser_base_url(captcha_config.remote_browser_base_url)
             config.set_remote_browser_api_key(captcha_config.remote_browser_api_key)
             config.set_remote_browser_timeout(captcha_config.remote_browser_timeout)
@@ -2272,6 +2288,8 @@ class Database:
         capsolver_base_url: str = None,
         captcharun_api_key: str = None,
         captcharun_base_url: str = None,
+        twocaptcha_api_key: str = None,
+        twocaptcha_base_url: str = None,
         remote_browser_base_url: str = None,
         remote_browser_api_key: str = None,
         remote_browser_timeout: int = None,
@@ -2599,6 +2617,19 @@ class Database:
                     ),
                 )
 
+            # Keep the new provider update in the same transaction as the existing fields.
+            previous_captcha = dict(row) if row else {}
+            await db.execute(
+                "UPDATE captcha_config SET twocaptcha_api_key = ?, twocaptcha_base_url = ? WHERE id = 1",
+                (
+                    twocaptcha_api_key
+                    if twocaptcha_api_key is not None
+                    else previous_captcha.get("twocaptcha_api_key", ""),
+                    twocaptcha_base_url
+                    if twocaptcha_base_url is not None
+                    else previous_captcha.get("twocaptcha_base_url", "https://api.2captcha.com"),
+                ),
+            )
             await db.commit()
 
     # Plugin config operations

@@ -57,6 +57,7 @@ ADMIN_SESSION_COOKIE_NAME = "admin_session"
 SUPPORTED_API_CAPTCHA_METHODS = {
     "yescaptcha",
     "captcharun",
+    "twocaptcha",
     "capmonster",
     "ezcaptcha",
     "capsolver",
@@ -468,6 +469,16 @@ async def _solve_recaptcha_with_api_service(
         base_url = config.captcharun_base_url
         task_type = "ReCaptchaV3"
         min_score = None
+    elif method == "twocaptcha":
+        from ..services.twocaptcha import solve_recaptcha_v3
+
+        proxy_url = await proxy_manager.get_request_proxy_url() if proxy_manager else None
+        solution = await solve_recaptcha_v3(
+            config.twocaptcha_api_key, website_url, website_key, action,
+            enterprise=enterprise, base_url=config.twocaptcha_base_url,
+            proxy_url=proxy_url,
+        )
+        return solution["gRecaptchaResponse"]
     else:
         raise RuntimeError(f"不支持的打码方式: {method}")
 
@@ -1970,6 +1981,17 @@ async def update_captcha_config(
     capsolver_base_url = request.get("capsolver_base_url")
     captcharun_api_key = request.get("captcharun_api_key")
     captcharun_base_url = request.get("captcharun_base_url")
+    twocaptcha_api_key = request.get("twocaptcha_api_key")
+    twocaptcha_base_url = request.get("twocaptcha_base_url")
+    if twocaptcha_api_key is not None and not isinstance(twocaptcha_api_key, str):
+        return {"success": False, "message": "2Captcha API Key 必须是字符串"}
+    if twocaptcha_base_url is not None:
+        if not isinstance(twocaptcha_base_url, str):
+            return {"success": False, "message": "2Captcha API 地址必须是字符串"}
+        try:
+            twocaptcha_base_url = _normalize_http_base_url(twocaptcha_base_url.strip() or "https://api.2captcha.com")
+        except RuntimeError as exc:
+            return {"success": False, "message": str(exc)}
     remote_browser_base_url = request.get("remote_browser_base_url")
     remote_browser_api_key = request.get("remote_browser_api_key")
     remote_browser_timeout = request.get("remote_browser_timeout", 60)
@@ -2041,6 +2063,8 @@ async def update_captcha_config(
         capsolver_base_url=capsolver_base_url,
         captcharun_api_key=captcharun_api_key,
         captcharun_base_url=captcharun_base_url,
+        twocaptcha_api_key=twocaptcha_api_key,
+        twocaptcha_base_url=twocaptcha_base_url,
         remote_browser_base_url=remote_browser_base_url,
         remote_browser_api_key=remote_browser_api_key,
         remote_browser_timeout=remote_browser_timeout,
@@ -2111,6 +2135,8 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "capsolver_base_url": captcha_config.capsolver_base_url,
         "captcharun_api_key": captcha_config.captcharun_api_key,
         "captcharun_base_url": captcha_config.captcharun_base_url,
+        "twocaptcha_api_key": captcha_config.twocaptcha_api_key,
+        "twocaptcha_base_url": captcha_config.twocaptcha_base_url,
         "remote_browser_base_url": captcha_config.remote_browser_base_url,
         "remote_browser_api_key": captcha_config.remote_browser_api_key,
         "remote_browser_timeout": captcha_config.remote_browser_timeout,
