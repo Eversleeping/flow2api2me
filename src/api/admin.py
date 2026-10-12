@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import importlib
+import sys
 import json
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, Response
@@ -2125,6 +2126,18 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "browser_personal_fresh_restart_every_n_solves": captcha_config.browser_personal_fresh_restart_every_n_solves,
         "personal_idle_tab_ttl_seconds": captcha_config.personal_idle_tab_ttl_seconds,
     }
+
+
+@router.get("/api/captcha/browser-stats")
+async def get_browser_captcha_stats(token: str = Depends(verify_admin_token)):
+    """Inspect existing browser slots without starting a browser runtime."""
+    if config.captcha_method != "browser":
+        return {"captcha_method": config.captcha_method, "running": False, "browsers": []}
+    module = sys.modules.get("src.services.browser_captcha")
+    service = module.BrowserCaptchaService._instance if module else None
+    if service is None:
+        return {"captcha_method": "browser", "running": False, "browsers": []}
+    return {"captcha_method": "browser", "running": not service._closed, **service.get_stats()}
 
 
 @router.post("/api/captcha/score-test")

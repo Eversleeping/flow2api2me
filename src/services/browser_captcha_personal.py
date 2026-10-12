@@ -10987,6 +10987,7 @@ class BrowserCaptchaService:
         error_message: str = "",
         token_id: Optional[int] = None,
         slot_id: Optional[str] = None,
+        issued_at: Optional[float] = None,
     ):
         """上游生成接口异常时，对常驻标签页执行自愈恢复。"""
         if not project_id:
@@ -11000,6 +11001,12 @@ class BrowserCaptchaService:
                     debug_logger.log_warning(
                         f"[BrowserCaptcha] project_id={project_id}, slot={resolved_slot_id} 上游异常回调命中已失效 slot，跳过本次恢复"
                     )
+                    return
+                if (
+                    (token_id is not None and resident_info.token_id != token_id)
+                    or (issued_at is not None and resident_info.created_at > float(issued_at))
+                ):
+                    # A late result must not restart a rebuilt tab or a different account.
                     return
             else:
                 resolved_slot_id, resident_info = (
@@ -16535,6 +16542,7 @@ class _PersonalBrowserPoolService:
         error_message: str = "",
         token_id: Optional[int] = None,
         slot_id: Optional[str] = None,
+        issued_at: Optional[float] = None,
     ):
         await self._ensure_workers()
         exact_worker_index = self._parse_worker_index_from_slot_id(slot_id)
@@ -16547,6 +16555,7 @@ class _PersonalBrowserPoolService:
                 error_message=error_message,
                 token_id=token_id,
                 slot_id=slot_id,
+                issued_at=issued_at,
             )
             return
 
@@ -16581,6 +16590,7 @@ class _PersonalBrowserPoolService:
                 error_message=error_message,
                 token_id=token_id,
                 slot_id=slot_id,
+                issued_at=issued_at,
             )
 
     async def invalidate_token(self, project_id: str):

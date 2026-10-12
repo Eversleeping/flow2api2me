@@ -368,6 +368,7 @@ class CurrentFlowClientMixin:
         for retry_attempt in range(max_retries):
             started_at = time.time()
             browser_id = None
+            browser_submission_accepted = False
             attempt = {"attempt": retry_attempt + 1, "recaptcha_ok": False}
             try:
                 if progress_callback:
@@ -503,6 +504,11 @@ class CurrentFlowClientMixin:
                             "Flow StreamChat returned no generated media "
                             f"(rawLength={stream_result.get('rawLength')})"
                         )
+                    browser_submission_accepted = True
+                    await self._notify_browser_captcha_request_finished(
+                        browser_id, success=True,
+                    )
+                    browser_id = None
                     if progress_callback:
                         await progress_callback("processing_image", 72)
                     # 媒体 id 需通过 as29s 换取带签名的 flow-content 下载地址
@@ -563,13 +569,13 @@ class CurrentFlowClientMixin:
                 attempt["error"] = str(error)[:240]
                 attempt["duration_ms"] = int((time.time() - started_at) * 1000)
                 trace["generation_attempts"].append(attempt)
-                if bool(getattr(error, "outcome_unknown", False)):
+                if browser_submission_accepted or bool(getattr(error, "outcome_unknown", False)):
                     raise
                 retry_handler = getattr(
                     self, "_handle_retryable_generation_error", None
                 )
                 if retry_handler is not None:
-                    await retry_handler(
+                    should_retry = await retry_handler(
                         error,
                         retry_attempt,
                         max_retries,
@@ -577,10 +583,18 @@ class CurrentFlowClientMixin:
                         project_id,
                         "Personal image generation",
                     )
+                    if not should_retry:
+                        raise
                 if retry_attempt >= max_retries - 1:
                     raise
             finally:
-                await self._notify_browser_captcha_request_finished(browser_id)
+                if not browser_submission_accepted:
+                    if isinstance(browser_id, str) and ":lease-" in browser_id:
+                        await self._notify_browser_captcha_request_finished(
+                            browser_id, success=bool(attempt.get("success")),
+                        )
+                    else:
+                        await self._notify_browser_captcha_request_finished(browser_id)
         raise last_error or RuntimeError("Flow frontend image generation failed")
 
     def _resolve_batchexecute_captcha_override(self) -> Optional[str]:
