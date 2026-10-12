@@ -46,7 +46,7 @@
 - 🎨 **文生图** / **图生图**
 - 🎬 **文生视频** / **图生视频**
 - 🎞️ **首尾帧视频**
-- 🔄 **AT/ST自动刷新** - AT 过期自动刷新，ST 过期时自动通过浏览器更新（personal 模式）
+- 🔄 **Cookie 自动刷新** - 定时刷新完整 Google/Flow Cookie 并验证登录态，支持 browser/personal 浏览器兜底；登录失效后需重新同步 Cookie
 - 📊 **余额显示** - 实时查询和显示 VideoFX Credits
 - 🚀 **负载均衡** - 多 Token 轮询和并发控制
 - 🌐 **代理支持** - 支持 HTTP/SOCKS5 代理

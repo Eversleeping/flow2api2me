@@ -41,6 +41,7 @@ from .recaptcha_runtime import (
 from .browser_cookie_utils import (
     build_browser_cookie_targets,
     build_cookie_signature,
+    is_partitioned_cookie,
     merge_browser_cookie_payloads,
     normalize_cookie_storage_text,
 )
@@ -7529,6 +7530,8 @@ class BrowserCaptchaService:
     def _serialize_browser_cookie_for_storage(
         cls, cookie: Any
     ) -> Optional[Dict[str, Any]]:
+        if is_partitioned_cookie(cookie):
+            return None
         if isinstance(cookie, dict):
             source = dict(cookie)
         else:
@@ -7605,8 +7608,12 @@ class BrowserCaptchaService:
         if name.startswith("__Host-"):
             serialized.pop("domain", None)
             serialized["path"] = "/"
-            if "url" not in serialized:
-                serialized["url"] = "https://flow.google.com/"
+            origin = urlparse(
+                url or (f"https://{domain.lstrip('.')}/" if domain else "https://flow.google.com/")
+            )
+            serialized["url"] = (
+                f"https://{origin.netloc}/" if origin.netloc else "https://flow.google.com/"
+            )
 
         return serialized
 
@@ -14048,231 +14055,73 @@ class BrowserCaptchaService:
             "请在打开的浏览器中登录账号。登录完成后，无需关闭浏览器，脚本下次运行时会自动使用此状态。"
         )
 
-    # ========== Session Token 刷新 ==========
-
-    async def refresh_session_token(
-        self, project_id: str, token_id: Optional[int] = None
-    ) -> Optional[str]:
-        """从常驻标签页获取最新的 Session Token
-        
-        复用共享打码标签页，通过刷新页面并从 cookies 中提取
-        __Secure-next-auth.session-token
-        
-        Args:
-            project_id: 项目ID，用于定位常驻标签页
-            
-        Returns:
-            新的 Session Token，如果获取失败返回 None
-        """
-        for attempt in range(2):
-            self._mark_runtime_active()
-            # 确保浏览器已初始化
-            await self.initialize()
-
-            start_time = time.time()
-            debug_logger.log_info(
-                f"[BrowserCaptcha] 开始刷新 Session Token (project: {project_id}, token_id={token_id}, attempt={attempt + 1})..."
-            )
-
-            async with self._resident_lock:
-                slot_id, resident_info = self._resolve_resident_slot_for_project_locked(
-                    project_id,
-                    token_id=token_id,
+    async def refresh_google_cookies(
+        self, project_id: Optional[str], *, token_id: int
+    ) -> Dict[str, Any]:
+        """Export current Google/Flow Cookies from the reserved account context."""
+        if not token_id:
+            raise ValueError("Cookie 刷新必须指定 Token ID")
+        self._mark_runtime_active()
+        await self.initialize()
+        slot_id, resident_info = await self._ensure_resident_tab(
+            project_id, token_id=token_id, reserve_for_solve=True, return_slot_key=True
+        )
+        consumed = False
+        try:
+            if not slot_id or not resident_info or not resident_info.tab:
+                raise RuntimeError("账号浏览器标签页不可用")
+            async with resident_info.solve_lock:
+                await self._consume_resident_slot_reservation(slot_id, resident_info)
+                consumed = True
+                if not await self._apply_token_cookie_binding(
+                    resident_info, token_id, label="cookie_refresh", acquire_lock=False
+                ):
+                    raise RuntimeError("账号浏览器 Cookie 绑定失败")
+                if resident_info.token_id != int(token_id):
+                    raise RuntimeError("浏览器标签页绑定的 Token 不一致")
+                resident_info.recaptcha_ready = False
+                tab = resident_info.tab
+                await self._tab_get(
+                    tab, "https://flow.google.com/projects", label="cookie_refresh_page"
                 )
-
-            if resident_info is None or not slot_id:
-                slot_id, resident_info = await self._ensure_resident_tab(
-                    project_id,
-                    token_id=token_id,
-                    return_slot_key=True,
-                )
-
-            if resident_info is None or not slot_id:
-                if attempt == 0 and not await self._probe_browser_runtime():
-                    await self._recover_browser_runtime(
-                        project_id, reason="refresh_session_prepare"
-                    )
-                    continue
-                debug_logger.log_warning(
-                    f"[BrowserCaptcha] 无法为 project_id={project_id} 获取共享常驻标签页"
-                )
-                return None
-
-            if not resident_info or not resident_info.tab:
-                debug_logger.log_error(f"[BrowserCaptcha] 无法获取常驻标签页")
-                return None
-
-            if not await self._ensure_resident_token_binding(
-                resident_info,
-                token_id,
-                label=f"refresh_session:{slot_id}",
-            ):
-                debug_logger.log_warning(
-                    f"[BrowserCaptcha] 刷新 Session Token 前 cookie 绑定未就绪，尝试重建 (slot={slot_id}, project={project_id}, token_id={token_id})"
-                )
-                slot_id, resident_info = await self._rebuild_resident_tab(
-                    project_id,
-                    token_id=token_id,
-                    slot_id=slot_id,
-                    return_slot_key=True,
-                )
-                if not resident_info or not slot_id or not resident_info.tab:
-                    if attempt == 0 and not await self._probe_browser_runtime():
-                        await self._recover_browser_runtime(
-                            project_id, reason="refresh_session_rebuild_cookie_binding"
-                        )
-                        continue
-                    return None
-
-            tab = resident_info.tab
-
-            try:
-                async with resident_info.solve_lock:
-                    # 刷新页面以获取最新的 cookies
-                    debug_logger.log_info(
-                        f"[BrowserCaptcha] 刷新常驻标签页以获取最新 cookies..."
-                    )
-                    resident_info.recaptcha_ready = False
-                    await self._run_with_timeout(
-                        self._tab_reload(
+                identity = None
+                for _ in range(30):
+                    try:
+                        identity = await self._tab_evaluate(
                             tab,
-                            label=f"refresh_session_reload:{slot_id}",
-                        ),
-                        timeout_seconds=self._session_refresh_timeout_seconds,
-                        label=f"refresh_session_reload_total:{slot_id}",
-                    )
-
-                    # 等待页面加载完成
-                    for _ in range(30):
-                        await asyncio.sleep(1)
-                        try:
-                            ready_state = await self._tab_evaluate(
-                                tab,
-                                "document.readyState",
-                                label=f"refresh_session_ready_state:{slot_id}",
-                                timeout_seconds=2.0,
-                            )
-                            if ready_state == "complete":
-                                break
-                        except Exception:
-                            pass
-
-                    resident_info.recaptcha_ready = await self._wait_for_recaptcha(tab)
-                    if not resident_info.recaptcha_ready:
-                        debug_logger.log_warning(
-                            f"[BrowserCaptcha] 刷新 Session Token 后 reCAPTCHA 未恢复就绪 (slot={slot_id})"
+                            "({host: location.hostname, ready: document.readyState, email: (window.WIZ_global_data || {}).oPEP7c || ''})",
+                            label="cookie_refresh_identity", timeout_seconds=2.0,
+                            return_by_value=True,
                         )
-
-                    # 额外等待确保 cookies 已设置
-                    await asyncio.sleep(2)
-
-                    # 从 cookies 中提取 __Secure-next-auth.session-token
-                    session_token = None
-
-                    try:
-                        cookies = await self._get_browser_cookies(
-                            label=f"refresh_session_get_cookies:{slot_id}",
-                            browser_context_id=resident_info.browser_context_id,
-                        )
-
-                        for cookie in cookies:
-                            if cookie.name == "__Secure-next-auth.session-token":
-                                session_token = cookie.value
-                                break
-
-                    except Exception as e:
-                        debug_logger.log_warning(
-                            f"[BrowserCaptcha] 通过 cookies API 获取失败: {e}，尝试从 document.cookie 获取..."
-                        )
-
-                        try:
-                            all_cookies = await self._tab_evaluate(
-                                tab,
-                                "document.cookie",
-                                label=f"refresh_session_document_cookie:{slot_id}",
-                            )
-                            if all_cookies:
-                                for part in all_cookies.split(";"):
-                                    part = part.strip()
-                                    if part.startswith(
-                                        "__Secure-next-auth.session-token="
-                                    ):
-                                        session_token = part.split("=", 1)[1]
-                                        break
-                        except Exception as e2:
-                            debug_logger.log_error(
-                                f"[BrowserCaptcha] document.cookie 获取失败: {e2}"
-                            )
-
-                duration_ms = (time.time() - start_time) * 1000
-
-                if session_token:
-                    resident_info.last_used_at = time.time()
-                    self._remember_project_affinity(project_id, slot_id, resident_info)
-                    self._remember_token_affinity(token_id, slot_id, resident_info)
-                    self._resident_error_streaks.pop(slot_id, None)
-                    self._mark_browser_health(True)
-                    debug_logger.log_info(
-                        f"[BrowserCaptcha] ✅ Session Token 获取成功（耗时 {duration_ms:.0f}ms）"
-                    )
-                    return session_token
-
-                debug_logger.log_error(
-                    f"[BrowserCaptcha] ❌ 未找到 __Secure-next-auth.session-token cookie"
+                        if isinstance(identity, dict) and identity.get("ready") == "complete":
+                            break
+                    except Exception:
+                        identity = None
+                    await asyncio.sleep(0.3)
+                if not isinstance(identity, dict) or identity.get("ready") != "complete":
+                    raise TimeoutError("Flow Cookie 刷新页面加载超时")
+                if identity.get("host") != "flow.google.com" or not identity.get("email"):
+                    raise RuntimeError("Flow 登录已失效，请重新同步 Google Cookies")
+                cookies = await self._get_browser_cookies(
+                    label="cookie_refresh_export",
+                    browser_context_id=resident_info.browser_context_id,
                 )
-                return None
-
-            except Exception as e:
-                debug_logger.log_error(
-                    f"[BrowserCaptcha] 刷新 Session Token 异常: {str(e)}"
-                )
-
-                if attempt == 0 and self._is_browser_runtime_error(e):
-                    if await self._recover_browser_runtime(
-                        project_id, reason=f"refresh_session:{slot_id}"
-                    ):
+                serialized = []
+                for cookie in cookies or []:
+                    item = self._serialize_browser_cookie_for_storage(cookie)
+                    if not item:
                         continue
-
-                slot_id, resident_info = await self._rebuild_resident_tab(
-                    project_id,
-                    token_id=token_id,
-                    slot_id=slot_id,
-                    return_slot_key=True,
-                )
-                if resident_info and slot_id:
-                    try:
-                        async with resident_info.solve_lock:
-                            cookies = await self._get_browser_cookies(
-                                label=f"refresh_session_get_cookies_after_rebuild:{slot_id}",
-                                browser_context_id=resident_info.browser_context_id,
-                            )
-                        for cookie in cookies:
-                            if cookie.name == "__Secure-next-auth.session-token":
-                                resident_info.last_used_at = time.time()
-                                self._remember_project_affinity(
-                                    project_id, slot_id, resident_info
-                                )
-                                self._remember_token_affinity(
-                                    token_id, slot_id, resident_info
-                                )
-                                self._resident_error_streaks.pop(slot_id, None)
-                                self._mark_browser_health(True)
-                                debug_logger.log_info(
-                                    f"[BrowserCaptcha] ✅ 重建后 Session Token 获取成功"
-                                )
-                                return cookie.value
-                    except Exception as rebuild_error:
-                        if attempt == 0 and self._is_browser_runtime_error(
-                            rebuild_error
-                        ):
-                            if await self._recover_browser_runtime(
-                                project_id, reason=f"refresh_session_rebuild:{slot_id}"
-                            ):
-                                continue
-
-                return None
-
-        return None
+                    host = str(item.get("domain") or urlparse(item.get("url", "")).hostname or "").lstrip(".")
+                    if host == "google.com" or host.endswith(".google.com"):
+                        serialized.append(item)
+                # The manager validates this candidate before committing it; no blind DB writes.
+                return {
+                    "google_cookies": json.dumps(serialized, ensure_ascii=False, separators=(",", ":")),
+                    "email": identity.get("email", ""),
+                }
+        finally:
+            if slot_id and not consumed:
+                await self._release_resident_slot_reservation(slot_id, resident_info)
 
     async def warmup_resident_tabs(
         self,
@@ -16509,43 +16358,35 @@ class _PersonalBrowserPoolService:
                         return warmed_slots
         return warmed_slots
 
-    async def refresh_session_token(
-        self, project_id: str, token_id: Optional[int] = None
-    ) -> Optional[str]:
+    async def refresh_google_cookies(
+        self, project_id: Optional[str], *, token_id: int
+    ) -> Dict[str, Any]:
+        if not token_id:
+            raise ValueError("Cookie 刷新必须指定 Token ID")
         await self._ensure_workers()
         excluded_indexes: set[int] = set()
-        max_attempts = min(len(self._workers), 3)
-
-        for _ in range(max_attempts):
+        last_error = None
+        for _ in range(min(len(self._workers), 3)):
             worker_index = None
-            worker = None
             try:
                 worker_index, worker = await self._acquire_worker(
-                    project_id=project_id,
-                    token_id=token_id,
+                    project_id=project_id, token_id=token_id,
                     excluded_indexes=excluded_indexes,
                 )
                 excluded_indexes.add(worker_index)
-                session_token = await worker.refresh_session_token(
-                    project_id, token_id=token_id
-                )
-            except Exception as e:
-                worker_label = (
-                    worker_index + 1 if worker_index is not None else "unknown"
-                )
-                debug_logger.log_warning(
-                    f"[BrowserCaptchaPool] Session Token 刷新失败，尝试切换其他实例 (worker={worker_label}): {e}"
-                )
-                continue
-            finally:
-                await self._release_worker_reservation(worker_index)
-            if session_token:
+                result = await worker.refresh_google_cookies(project_id, token_id=token_id)
                 self._last_successful_worker_index = worker_index
                 self._remember_affinity(
                     project_id=project_id, token_id=token_id, worker_index=worker_index
                 )
-                return session_token
-        return None
+                return result
+            except Exception as exc:
+                last_error = exc
+            finally:
+                await self._release_worker_reservation(worker_index)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("账号浏览器 Cookie 刷新失败：没有可用实例")
 
     async def start_resident_mode(self, project_id: str):
         await self._ensure_workers()

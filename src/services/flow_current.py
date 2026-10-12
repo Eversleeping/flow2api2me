@@ -137,6 +137,7 @@ class CurrentFlowClientMixin:
             "expires": expires.isoformat().replace("+00:00", "Z"),
             "user": {},
             "credits": credits.get("credits", 0),
+            "userPaygateTier": credits.get("userPaygateTier"),
         }
 
     async def create_project(

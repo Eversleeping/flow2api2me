@@ -33,7 +33,7 @@ from ..core.browser_runtime_status import (
 )
 from ..core.config import config
 from .recaptcha_runtime import TRUSTED_RECAPTCHA_HOOK_SOURCE, build_recaptcha_execute_script
-from .browser_cookie_utils import build_browser_cookie_targets, build_cookie_signature
+from .browser_cookie_utils import build_browser_cookie_targets, build_cookie_signature, is_partitioned_cookie
 
 
 # ==================== Docker 环境检测 ====================
@@ -2993,6 +2993,46 @@ class TokenBrowser:
                 self._solve_inflight = max(0, self._solve_inflight - 1)
                 self.note_idle()
     
+    async def refresh_google_cookies(
+        self, *, token_id: int, token_proxy_url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Refresh the bound account's current frontend without solving a CAPTCHA."""
+        if not token_id:
+            raise ValueError("Cookie 刷新必须指定 Token ID")
+        async with self._semaphore:
+            self._solve_inflight += 1
+            page = None
+            try:
+                _, _, context = await self._get_or_create_shared_browser(
+                    token_proxy_url=token_proxy_url, token_id=token_id
+                )
+                page = await context.new_page()
+                response = await page.goto(
+                    "https://flow.google.com/projects", wait_until="domcontentloaded", timeout=30000
+                )
+                if urlparse(page.url).hostname != "flow.google.com" or not response or response.status != 200:
+                    raise RuntimeError("Flow 登录已失效，请重新同步 Google Cookies")
+                email = await page.evaluate("(window.WIZ_global_data || {}).oPEP7c || ''")
+                cookies = [
+                    cookie for cookie in await context.cookies()
+                    if not is_partitioned_cookie(cookie) and (
+                        cookie["domain"].lstrip(".") == "google.com"
+                        or cookie["domain"].endswith(".google.com")
+                    )
+                ]
+                return {
+                    "google_cookies": json.dumps(cookies, ensure_ascii=False, separators=(",", ":")),
+                    "email": email,
+                }
+            finally:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                self._solve_inflight = max(0, self._solve_inflight - 1)
+                self.note_idle()
+
     async def get_token(
         self,
         project_id: str,
@@ -3953,7 +3993,19 @@ class BrowserCaptchaService:
                 self._stats["gen_ok"] += 1
             else:
                 self._stats["gen_fail"] += 1
-            return token, request.ref, deepcopy(request.fingerprint)
+        return token, request.ref, deepcopy(request.fingerprint)
+
+    async def refresh_google_cookies(
+        self, project_id: Optional[str], *, token_id: int
+    ) -> Dict[str, Any]:
+        self._check_available()
+        if not token_id:
+            raise ValueError("Cookie 刷新必须指定 Token ID")
+        token_proxy_url = await self._resolve_token_proxy_url(token_id)
+        async with self._borrow_browser(project_id, token_id) as request:
+            return await request.browser.refresh_google_cookies(
+                token_id=token_id, token_proxy_url=token_proxy_url
+            )
 
     async def get_custom_token(
         self,

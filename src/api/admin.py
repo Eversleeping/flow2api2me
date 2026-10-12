@@ -1196,10 +1196,7 @@ async def refresh_credits(token_id: int, token: str = Depends(verify_admin_token
 
 @router.post("/api/tokens/{token_id}/refresh-at")
 async def refresh_at(token_id: int, token: str = Depends(verify_admin_token)):
-    """手动刷新Token的AT (使用ST转换) 🆕
-    
-    如果 AT 刷新失败且处于 personal 模式，会自动尝试通过浏览器刷新 ST
-    """
+    """刷新完整 Google/Flow Cookie 并验证当前登录态。"""
     from ..core.logger import debug_logger
     from ..core.config import config
     
@@ -1208,16 +1205,14 @@ async def refresh_at(token_id: int, token: str = Depends(verify_admin_token)):
     )
     
     try:
-        # 调用token_manager的内部刷新方法（包含 ST 自动刷新逻辑）
-        success = await token_manager._refresh_at(token_id)
+        # 手动刷新完整 Cookie，不依赖 AT 标识是否到期。
+        success = await token_manager.refresh_cookies(token_id)
 
         if success:
             # 获取更新后的token信息
             updated_token = await token_manager.get_token(token_id)
             
-            message = "AT刷新成功"
-            if config.captcha_method == "personal":
-                message += "（支持ST自动刷新）"
+            message = "Cookie 刷新并验证成功"
             
             debug_logger.log_info(f"[API] AT 刷新成功: token_id={token_id}")
             
@@ -1235,9 +1230,10 @@ async def refresh_at(token_id: int, token: str = Depends(verify_admin_token)):
         else:
             debug_logger.log_error(f"[API] AT 刷新失败: token_id={token_id}")
             
-            error_detail = "AT刷新失败"
-            if config.captcha_method != "personal":
-                error_detail += f"（当前打码模式: {config.captcha_method}，ST自动刷新仅在 personal 模式下可用）"
+            snapshot = await token_manager.get_token(token_id)
+            error_detail = (
+                snapshot.last_st_refresh_result if snapshot else None
+            ) or "Cookie 刷新失败，请重新同步完整的 Google Cookies"
             
             raise HTTPException(status_code=500, detail=error_detail)
     except HTTPException:

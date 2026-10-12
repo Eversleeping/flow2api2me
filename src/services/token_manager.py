@@ -725,13 +725,11 @@ class TokenManager:
             )
             new_st = await self._try_refresh_st(token_id, token)
             if new_st:
-                debug_logger.log_info(
-                    f"[AT_REFRESH] Token {token_id}: ST refreshed, retrying AT refresh..."
-                )
-                latest_token = await self.db.get_token(token_id) or token
-                result = await self._do_refresh_at(token_id, new_st, latest_token)
-                if result:
-                    return True
+                return True
+
+            latest_token = await self.db.get_token(token_id)
+            if latest_token and latest_token.google_cookies != token.google_cookies:
+                return await self._do_refresh_at(token_id, latest_token.st, latest_token)
 
             failure_reasons: List[str] = [self._last_at_refresh_error.get(token_id, "")]
             try:
@@ -859,234 +857,151 @@ class TokenManager:
                     return True
 
         except Exception as e:
-            self._last_at_refresh_error[token_id] = str(e)
+            self._last_at_refresh_error[token_id] = f"{type(e).__name__}: {e}"
             debug_logger.log_error(
                 f"[AT_REFRESH] Token {token_id}: AT刷新失败 - {str(e)}"
             )
             record_token_refresh("at", "failure")
             return False
 
+    async def _save_refreshed_cookies(
+        self, token_id: int, token: Token, result: Dict[str, Any]
+    ) -> str:
+        """Validate the current account RPC before atomically saving its Cookie jar."""
+        from .browser_cookie_utils import validate_flow_cookie_storage
+
+        cookies = str(result.get("google_cookies") or "").strip()
+        validate_flow_cookie_storage(cookies)
+        expected_email = (token.login_account or token.email or "").strip().casefold()
+        observed_email = str(result.get("email") or "").strip().casefold()
+        if not observed_email or (expected_email and observed_email != expected_email):
+            raise ValueError("Flow 登录账号与当前 Token 不一致，请重新同步对应账号的 Google Cookies")
+
+        new_st = "frontend-" + hashlib.sha256(cookies.encode("utf-8")).hexdigest()[:32]
+        candidate = token.model_copy(update={"google_cookies": cookies, "st": new_st})
+        session = await self._st_to_at_for_token(candidate, new_st)
+        new_at = str(session.get("access_token") or "").strip()
+        if not new_at:
+            raise RuntimeError("Flow 登录态验证响应缺少 access_token")
+        updates = {
+            "google_cookies": cookies,
+            "st": new_st,
+            "at": new_at,
+            "at_expires": self._parse_at_expires(session.get("expires")),
+            "last_st_refresh_at": datetime.now(timezone.utc),
+            "last_st_refresh_result": "success",
+        }
+        if "credits" in session:
+            updates["credits"] = session["credits"]
+        if "userPaygateTier" in session:
+            updates["user_paygate_tier"] = session["userPaygateTier"]
+        saved = await self.db.update_token_if_cookie_matches(
+            token_id, token.google_cookies, **updates
+        )
+        if not saved:
+            raise RuntimeError("Cookie 在刷新期间已更新，请使用最新登录态重试")
+        self._mark_at_valid(token_id)
+        self._last_at_refresh_error.pop(token_id, None)
+        record_token_refresh("st", "success")
+        debug_logger.log_info(f"[COOKIE_REFRESH] Token {token_id}: Cookie 刷新并验证成功")
+        return new_st
+
+    async def _record_cookie_refresh_failure(self, token: Token, error: str) -> None:
+        await self.db.update_token_if_cookie_matches(
+            token.id, token.google_cookies,
+            last_st_refresh_at=datetime.now(timezone.utc),
+            last_st_refresh_result=error,
+        )
+        record_token_refresh("st", "failure")
+
     async def _try_protocol_refresh_st(
         self, token_id: int, token: Token
     ) -> Optional[str]:
-        if (
-            self._normalize_protocol_mode(getattr(token, "protocol_mode", "session"))
-            != "protocol"
-        ):
+        if not (token.google_cookies or "").strip():
             return None
-        if not (getattr(token, "google_cookies", "") or "").strip():
-            debug_logger.log_info(
-                f"[ST_REFRESH] Token {token_id}: 未配置 Google Cookies，跳过协议刷新"
-            )
-            return None
-
         try:
             from .protocol_login import protocol_loginer
 
-            proxy_url = (getattr(token, "proxy_url", "") or "").strip()
+            proxy_url = (token.proxy_url or "").strip()
             if not proxy_url:
                 proxy_manager = getattr(self.flow_client, "proxy_manager", None)
                 if proxy_manager is not None:
-                    try:
-                        fallback_proxy = await proxy_manager.get_request_proxy_url()
-                        proxy_url = (fallback_proxy or "").strip()
-                    except Exception as e:
-                        debug_logger.log_warning(
-                            f"[ST_REFRESH] Token {token_id}: 获取全局请求代理失败 - {e}"
-                        )
-
-            debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: 尝试协议刷新 ST...")
-            login_result = await protocol_loginer.login(
-                token.google_cookies,
-                proxy=proxy_url or None,
-                email=(getattr(token, "login_account", "") or token.email or None),
+                    proxy_url = await proxy_manager.get_request_proxy_url()
+            result = await protocol_loginer.login(
+                token.google_cookies, proxy=proxy_url or None,
+                email=token.login_account or token.email or None,
             )
-            if login_result.get("success") and login_result.get("session_token"):
-                new_st = str(login_result["session_token"]).strip()
-                await self.db.update_token(
-                    token_id,
-                    st=new_st,
-                    last_st_refresh_at=datetime.now(timezone.utc),
-                    last_st_refresh_result="success",
-                )
-                debug_logger.log_info(
-                    f"[ST_REFRESH] Token {token_id}: 协议刷新 ST 成功"
-                )
-                record_token_refresh("st", "success")
-                return new_st
-
-            error = str(login_result.get("error") or "协议刷新失败")
-            await self.db.update_token(
-                token_id,
-                last_st_refresh_at=datetime.now(timezone.utc),
-                last_st_refresh_result=error,
-            )
-            debug_logger.log_warning(
-                f"[ST_REFRESH] Token {token_id}: 协议刷新 ST 失败 - {error}"
-            )
-            record_token_refresh("st", "failure")
-            return None
-        except Exception as e:
-            await self.db.update_token(
-                token_id,
-                last_st_refresh_at=datetime.now(timezone.utc),
-                last_st_refresh_result=str(e),
-            )
-            debug_logger.log_error(
-                f"[ST_REFRESH] Token {token_id}: 协议刷新 ST 异常 - {e}"
-            )
-            record_token_refresh("st", "failure")
+            if not result.get("success"):
+                raise RuntimeError(str(result.get("error") or "Flow Cookie 刷新失败"))
+            return await self._save_refreshed_cookies(token_id, token, result)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            await self._record_cookie_refresh_failure(token, error)
+            debug_logger.log_warning(f"[COOKIE_REFRESH] Token {token_id}: 协议刷新失败 - {exc}")
             return None
 
-    async def _try_refresh_st(self, token_id: int, token) -> Optional[str]:
-        """尝试通过浏览器刷新 Session Token
-
-        使用常驻 tab 获取新的 __Secure-next-auth.session-token
-
-        Args:
-            token_id: Token ID
-            token: Token 对象
-
-        Returns:
-            新的 ST 字符串，如果失败返回 None
-        """
+    async def _try_refresh_st(self, token_id: int, token: Token) -> Optional[str]:
+        """Refresh full current-Flow Cookies, with an account-bound browser fallback."""
+        refreshed = await self._try_protocol_refresh_st(token_id, token)
+        if refreshed:
+            return refreshed
+        latest = await self.db.get_token(token_id)
+        if not latest or latest.google_cookies != token.google_cookies:
+            # A plugin or another request has supplied a newer Cookie jar.
+            return None
+        if config.captcha_method not in {"personal", "browser"}:
+            return None
         try:
-            from ..core.config import config
-
-            protocol_st = await self._try_protocol_refresh_st(token_id, token)
-            if protocol_st:
-                return protocol_st
-
-            # 仅在 personal 模式下支持 ST 自动刷新
-            if config.captcha_method != "personal":
-                debug_logger.log_info(
-                    f"[ST_REFRESH] 非 personal 模式，跳过 ST 自动刷新"
-                )
-                return None
-
-            if not token.current_project_id:
-                debug_logger.log_warning(
-                    f"[ST_REFRESH] Token {token_id} 没有 project_id，无法刷新 ST"
-                )
-                return None
-
-            debug_logger.log_info(
-                f"[ST_REFRESH] Token {token_id}: 尝试通过浏览器刷新 ST..."
-            )
-
-            from .browser_captcha_personal import BrowserCaptchaService
-
-            service = await BrowserCaptchaService.get_instance(self.db)
-
-            refresh_timeout_seconds = 45.0
-            try:
-                new_st = await asyncio.wait_for(
-                    service.refresh_session_token(token.current_project_id),
-                    timeout=refresh_timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                debug_logger.log_error(
-                    f"[ST_REFRESH] Token {token_id}: 刷新 ST 超时 ({refresh_timeout_seconds:.0f}s)"
-                )
-                record_token_refresh("st", "failure")
-                return None
-            if new_st and new_st != token.st:
-                # 更新数据库中的 ST
-                await self.db.update_token(token_id, st=new_st)
-                debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: ST 已自动更新")
-                record_token_refresh("st", "success")
-                return new_st
-            elif new_st == token.st:
-                debug_logger.log_warning(
-                    f"[ST_REFRESH] Token {token_id}: 获取到的 ST 与原 ST 相同，可能登录已失效"
-                )
-                record_token_refresh("st", "failure")
-                return None
+            if config.captcha_method == "personal":
+                from .browser_captcha_personal import BrowserCaptchaService
             else:
-                debug_logger.log_warning(
-                    f"[ST_REFRESH] Token {token_id}: 无法获取新 ST"
-                )
-                record_token_refresh("st", "failure")
-                return None
-
-        except Exception as e:
-            debug_logger.log_error(
-                f"[ST_REFRESH] Token {token_id}: 刷新 ST 失败 - {str(e)}"
+                from .browser_captcha import BrowserCaptchaService
+            service = await BrowserCaptchaService.get_instance(self.db)
+            result = await asyncio.wait_for(
+                service.refresh_google_cookies(token.current_project_id, token_id=token_id),
+                timeout=45.0,
             )
-            record_token_refresh("st", "failure")
+            return await self._save_refreshed_cookies(token_id, token, result)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            await self._record_cookie_refresh_failure(token, error)
+            debug_logger.log_warning(f"[COOKIE_REFRESH] Token {token_id}: 浏览器刷新失败 - {error}")
             return None
+
+    async def refresh_cookies(self, token_id: int) -> bool:
+        """Explicitly renew current-Flow Cookies even when the AT marker is valid."""
+        refresh_lock = await self._get_token_lock(
+            self._refresh_locks, self._refresh_lock_guard, token_id
+        )
+        async with refresh_lock:
+            token = await self.db.get_token(token_id)
+            if not token:
+                return False
+            if not (token.google_cookies or "").strip():
+                return await self._do_refresh_at(token_id, token.st, token)
+            if await self._try_refresh_st(token_id, token):
+                return True
+            latest = await self.db.get_token(token_id)
+            if latest and latest.google_cookies != token.google_cookies:
+                return await self._do_refresh_at(token_id, latest.st, latest)
+            return False
 
     async def _refresh_protocol_token(self, token: Token, now: datetime) -> None:
         token_id = int(token.id)
         refresh_lock = await self._get_token_lock(
-            self._refresh_locks,
-            self._refresh_lock_guard,
-            token_id,
+            self._refresh_locks, self._refresh_lock_guard, token_id
         )
         async with refresh_lock:
             latest = await self.db.get_token(token_id)
-            if not latest or not latest.is_active:
-                return
-            if not latest.auto_refresh_enabled:
-                return
-            if self._normalize_protocol_mode(latest.protocol_mode) != "protocol":
+            if not latest or not latest.is_active or not latest.auto_refresh_enabled:
                 return
             if not (latest.google_cookies or "").strip():
                 return
-
-            new_st = await self._try_protocol_refresh_st(token_id, latest)
-            if not new_st:
-                return
-
-            try:
-                session = await self._st_to_at_for_token(latest, new_st)
-                new_at = str(session.get("access_token") or "").strip()
-                if not new_at:
-                    raise RuntimeError("ST 转 AT 响应缺少 access_token")
-
-                updates: Dict[str, Any] = {
-                    "st": new_st,
-                    "at": new_at,
-                    "at_expires": self._parse_at_expires(session.get("expires")),
-                    "last_st_refresh_at": now,
-                    "last_st_refresh_result": "success",
-                }
-                user_info = (
-                    session.get("user") if isinstance(session.get("user"), dict) else {}
-                )
-                if user_info.get("email"):
-                    updates["email"] = user_info.get("email")
-                if user_info.get("name"):
-                    updates["name"] = user_info.get("name")
-
-                try:
-                    credits_result = await self._get_credits_for_token(latest, new_at)
-                    updates["credits"] = credits_result.get("credits", 0)
-                    updates["user_paygate_tier"] = credits_result.get("userPaygateTier")
-                except Exception as e:
-                    debug_logger.log_warning(
-                        f"[PROTOCOL_REFRESH] Token {token_id}: 刷新余额失败 - {e}"
-                    )
-
-                await self.db.update_token(token_id, **updates)
-                record_token_refresh("at", "success")
-                debug_logger.log_info(
-                    f"[PROTOCOL_REFRESH] Token {token_id}: 协议刷新 ST/AT 成功"
-                )
-            except Exception as e:
-                await self.db.update_token(
-                    token_id,
-                    st=new_st,
-                    last_st_refresh_at=now,
-                    last_st_refresh_result=str(e),
-                )
-                record_token_refresh("at", "failure")
-                debug_logger.log_error(
-                    f"[PROTOCOL_REFRESH] Token {token_id}: 协议 ST 转 AT 失败 - {e}"
-                )
+            # Cookie and AT metadata are committed together after current RPC validation.
+            await self._try_refresh_st(token_id, latest)
 
     async def run_protocol_refresh_once(self) -> None:
-        """Refresh protocol-mode tokens whose ST refresh interval is due."""
+        """Refresh current-Flow Cookie sessions whose refresh interval is due."""
         try:
             refresh_config = await self.db.get_token_refresh_config()
         except Exception as e:
@@ -1101,8 +1016,6 @@ class TokenManager:
         for token in tokens:
             try:
                 if not token.auto_refresh_enabled:
-                    continue
-                if self._normalize_protocol_mode(token.protocol_mode) != "protocol":
                     continue
                 if not (token.google_cookies or "").strip():
                     continue

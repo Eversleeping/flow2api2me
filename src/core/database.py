@@ -1331,6 +1331,25 @@ class Database:
                 await db.execute(query, params)
                 await db.commit()
 
+    async def update_token_if_cookie_matches(
+        self, token_id: int, expected_cookies: str, **kwargs
+    ) -> bool:
+        """Save a refresh without overwriting a newer account Cookie push."""
+        allowed = {
+            "google_cookies", "st", "at", "at_expires", "credits",
+            "user_paygate_tier", "last_st_refresh_at", "last_st_refresh_result",
+        }
+        if not kwargs or not set(kwargs).issubset(allowed):
+            raise ValueError("Invalid cookie refresh fields")
+        async with self._connect(write=True) as db:
+            assignments = ", ".join(f"{key} = ?" for key in kwargs)
+            cursor = await db.execute(
+                f"UPDATE tokens SET {assignments} WHERE id = ? AND COALESCE(google_cookies, '') = ?",
+                [*kwargs.values(), token_id, expected_cookies or ""],
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def delete_token(self, token_id: int):
         """Delete token and related data"""
         async with self._connect(write=True) as db:

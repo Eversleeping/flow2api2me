@@ -11,9 +11,9 @@ class Token(BaseModel):
     id: Optional[int] = None
 
     # 认证信息 (核心)
-    st: str  # Session Token (__Secure-next-auth.session-token)
-    at: Optional[str] = None  # Access Token (从ST转换而来)
-    at_expires: Optional[datetime] = None  # AT过期时间
+    st: str  # 登录态兼容标识；新版 Flow 使用完整 Google/Flow Cookies
+    at: Optional[str] = None  # 登录态验证后的兼容标识
+    at_expires: Optional[datetime] = None  # 下次登录态校验时间
 
     # 基础信息
     email: str
@@ -44,7 +44,7 @@ class Token(BaseModel):
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
 
-    # 协议刷新 Session Token
+    # Google/Flow Cookie 刷新；保留旧字段名兼容已有数据
     protocol_mode: str = "session"  # session/protocol
     google_cookies: str = ""
     login_account: str = ""
