@@ -16,27 +16,13 @@
 <table>
 <tr>
 <td width="180" align="center" valign="middle">
-  <a href="https://go.apimart.ai/gh-flow2api">
-    <img src="static/sponsors/apimart-banner.jpg" alt="APIMart" width="150">
-  </a>
-</td>
-<td valign="top">
-  感谢 <strong>APIMart</strong> 赞助了本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 \$0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过<a href="https://go.apimart.ai/gh-flow2api">此注册链接</a>注册即可开用。<br><br>
-  Thanks to <strong>APIMart</strong> for sponsoring this project! APIMart is a low-cost API platform for AI image &amp; video generation — GPT-Image-2 from \$0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-flow2api">sign up here</a> to get started.
-</td>
-</tr>
-</table>
-
-<table>
-<tr>
-<td width="180" align="center" valign="middle">
   <a href="https://useapi.net/docs/articles/google-flow-api-zh?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">
     <img src="https://useapi.net/assets/images/sponsor/useapi-banner.png" alt="useapi.net" width="150">
   </a>
 </td>
 <td valign="top">
-  感谢 <strong>useapi.net</strong> 赞助了本项目！<strong>一个订阅，全部 API</strong>：useapi.net 为你自己的 Google 账号提供托管 API：<strong>Google Flow</strong>（Veo 3.1、带原生音频的 Omni 1.1 Flash、Nano Banana Pro）、<strong>Google Vids</strong>（新！Gemini Omni 1.1 Flash 带配音数字人，可延长到约 41 秒，<strong>无需验证码</strong>，额度与 Flow 分开，同一账号同时使用 Flow 和 Vids，Omni 产能约翻倍）、<strong>Google Flow Music</strong>（Lyria 3.5 整首歌曲）和 <strong>Gemini Notebook</strong>（NotebookLM）。生成消耗你 Google AI 订阅里的额度，无需自己部署。同一订阅还包含 Dreamina、可灵 Kling、PixVerse、海螺 MiniMax、Mureka、Runway 等 API，每月固定 $15。<a href="https://useapi.net/docs/articles/google-flow-api-zh?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Flow 中文教程</a> · <a href="https://useapi.net/docs/articles/google-vids-api-zh?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Vids 中文教程</a> · <a href="https://buy.stripe.com/8x2aEX4Bd8Vh9PMg4qeUU03?client_reference_id=flow2api">订阅</a><br><br>
-  Thanks to <strong>useapi.net</strong> for sponsoring this project! <strong>One subscription, every API</strong>: useapi.net runs hosted APIs on your own Google account: <strong>Google Flow</strong> (Veo 3.1, audio-native Omni 1.1 Flash, Nano Banana Pro), <strong>Google Vids</strong> (new: Gemini Omni 1.1 Flash with voiced avatars, extend to about 41 s, <strong>no captcha</strong>, an allowance separate from Flow, so using Flow and Vids on the same account roughly doubles your Omni capacity), <strong>Google Flow Music</strong> (full songs with Lyria 3.5) and <strong>Gemini Notebook</strong> (NotebookLM). Generation uses your own Google AI plan, nothing to self-host. The same flat $15/month also covers Dreamina, Kling, PixVerse, MiniMax, Mureka, Runway and more. <a href="https://useapi.net/docs/api-google-flow-v1?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Flow docs</a> · <a href="https://useapi.net/docs/api-google-vids-v1?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Vids docs</a> · <a href="https://buy.stripe.com/8x2aEX4Bd8Vh9PMg4qeUU03?client_reference_id=flow2api">Subscribe</a>
+  感谢 <strong>useapi.net</strong> 赞助了本项目！<strong>一个订阅，全部 API</strong>：useapi.net 为你自己的 Google 账号提供托管 API：<strong>Google Flow</strong>（Veo 3.1、带原生音频的 Omni 1.1 Flash、Nano Banana Pro）、<strong>Google Vids</strong>（Gemini Omni 1.1 Flash 带配音数字人，<strong>无需验证码</strong>，额度与 Flow 分开，同一账号同时使用 Flow 和 Vids，Omni 产能约翻倍）、<strong>Google Flow Music</strong>（Lyria 3.5 整首歌曲）和 <strong>Gemini Notebook</strong>（NotebookLM）。新上线 <strong>Meta Muse</strong>（muse.ai）：用你自己的 Muse 账号生成图片和约 10 秒带台词配音的视频，免费账号可用。无需自己部署。同一订阅还包含 Dreamina、可灵 Kling、PixVerse、海螺 MiniMax、Mureka、Runway 等 API，每月固定 $15。<a href="https://useapi.net/docs/articles/google-flow-api-zh?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Flow 中文教程</a> · <a href="https://useapi.net/docs/articles/google-vids-api-zh?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Vids 中文教程</a> · <a href="https://useapi.net/docs/articles/muse-api-zh?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Muse 中文教程</a> · <a href="https://buy.stripe.com/8x2aEX4Bd8Vh9PMg4qeUU03?client_reference_id=flow2api">订阅</a><br><br>
+  Thanks to <strong>useapi.net</strong> for sponsoring this project! <strong>One subscription, every API</strong>: useapi.net runs hosted APIs on your own Google account: <strong>Google Flow</strong> (Veo 3.1, audio-native Omni 1.1 Flash, Nano Banana Pro), <strong>Google Vids</strong> (Gemini Omni 1.1 Flash with voiced avatars, <strong>no captcha</strong>, an allowance separate from Flow, so using both on one account roughly doubles your Omni capacity), <strong>Google Flow Music</strong> (full songs with Lyria 3.5) and <strong>Gemini Notebook</strong> (NotebookLM). New: <strong>Meta Muse</strong> (muse.ai): images and about 10-second videos with spoken dialogue on your own Muse account, free plan included. Nothing to self-host. The same flat $15/month also covers Dreamina, Kling, PixVerse, MiniMax, Mureka, Runway and more. <a href="https://useapi.net/docs/api-google-flow-v1?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Flow docs</a> · <a href="https://useapi.net/docs/api-google-vids-v1?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Vids docs</a> · <a href="https://useapi.net/docs/api-muse-v1?utm_source=flow2api&utm_medium=referral&utm_campaign=flow2api-sponsor">Muse docs</a> · <a href="https://buy.stripe.com/8x2aEX4Bd8Vh9PMg4qeUU03?client_reference_id=flow2api">Subscribe</a>
 </td>
 </tr>
 </table>
@@ -169,7 +155,7 @@ Prometheus 可直接抓 `/metrics`。如果部署到 Kubernetes，建议只在�
 
 ### 图片生成
 
-当前 `/v1/models` 与 Gemini `/models` 公开以下 15 个图片模型。旧图片名称继续兼容，但不再出现在模型列表中。
+当前 `/v1/models` 与 Gemini `/models` 公开 Nano Banana 2.1 和 Nano Banana 2 Lite 两个图片系列，共 30 个比例与分辨率变体。已有 `gemini-3.1-flash-image-*` 名称继续保留，调用新版 Nano Banana 2.1（`BELUGA`）。旧 Pro 名称 `gemini-3.0-pro-image-*` 继续调用 Nano Banana Pro（`GEM_PIX_2`），但不出现在模型列表中。旧 Imagen 模型已停止支持；模型不存在时不会回退到旧上游字段。
 
 | 当前公开名称 | 分辨率 | 比例 |
 |---|---:|---:|
@@ -188,6 +174,10 @@ Prometheus 可直接抓 `/metrics`。如果部署到 Kubernetes，建议只在�
 | `gemini-3.1-flash-image-square-4k` | 4K | 方图 |
 | `gemini-3.1-flash-image-four-three-4k` | 4K | 横屏 4:3 |
 | `gemini-3.1-flash-image-three-four-4k` | 4K | 竖屏 3:4 |
+
+Nano Banana 2 Lite 使用 `gemini-3.1-flash-lite-image-*`，比例及分辨率后缀与上表一致，例如 `gemini-3.1-flash-lite-image-landscape`、`gemini-3.1-flash-lite-image-portrait-2k`、`gemini-3.1-flash-lite-image-square-4k`。也支持简化名称 `gemini-3.1-flash-lite-image` 搭配 `aspectRatio` / `imageSize` 参数。
+
+2K/4K 变体通过生成后的高清放大实现，不代表 Lite 原生输出这些分辨率。主程序通过图片 RPC 明确提交模型、比例和参考图；浏览器打码与第三方打码均只提供验证码。`browser` / `personal` 模式不需要第三方打码密钥，图片、上传、放大及视频请求按所需 action 获取验证码。Lite 不会自动回退到其他图片模型。
 
 ### 视频生成
 
