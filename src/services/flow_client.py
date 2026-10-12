@@ -5274,7 +5274,7 @@ class _FlowClientBase(FlowFrontendMixin):
                 token, browser_id, fingerprint = await service.get_token(
                     project_id, action, token_id=token_id
                 )
-                if token and not self._extract_browser_captcha_session_id(
+                if token and action == "CHAT_GENERATION" and not self._extract_browser_captcha_session_id(
                     browser_id
                 ):
                     debug_logger.log_warning(

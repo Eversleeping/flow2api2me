@@ -103,8 +103,15 @@ def _build_cookie_from_mapping(
     path = str(raw_cookie.get("path") or "/").strip() or "/"
     if url:
         cookie["url"] = url
+        if raw_cookie.get("path"):
+            cookie["path"] = path
     elif domain:
-        cookie["domain"] = domain
+        host_only = raw_cookie.get("hostOnly")
+        if host_only is True or (host_only is None and not domain.startswith(".")):
+            scheme = "https" if raw_cookie.get("secure", True) else "http"
+            cookie["url"] = f"{scheme}://{domain.lstrip('.')}/"
+        else:
+            cookie["domain"] = domain
         cookie["path"] = path
     else:
         cookie["url"] = default_url
@@ -126,8 +133,8 @@ def _build_cookie_from_mapping(
     if name.startswith("__Host-"):
         cookie.pop("domain", None)
         cookie["path"] = "/"
-        if "url" not in cookie:
-            cookie["url"] = default_url
+        origin = urlparse(cookie.get("url") or (f"https://{domain.lstrip('.')}/" if domain else default_url))
+        cookie["url"] = f"https://{origin.netloc}/" if origin.netloc else default_url
     return cookie
 
 

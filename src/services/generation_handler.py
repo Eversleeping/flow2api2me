@@ -123,100 +123,89 @@ MODEL_CONFIG = {
         "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K",
     },
-    # 图片生成 - IMAGEN_3_5 (Imagen 4.0)
-    "imagen-4.0-generate-preview-landscape": {
-        "type": "image",
-        "model_name": "IMAGEN_3_5",
-        "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
-    },
-    "imagen-4.0-generate-preview-portrait": {
-        "type": "image",
-        "model_name": "IMAGEN_3_5",
-        "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT",
-    },
-    # 图片生成 - NARWHAL (新版)
+    # 图片生成 - BELUGA (Nano Banana 2.1)
     "gemini-3.1-flash-image-landscape": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
     },
     "gemini-3.1-flash-image-portrait": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT",
     },
     "gemini-3.1-flash-image-square": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_SQUARE",
     },
     "gemini-3.1-flash-image-four-three": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
     },
     "gemini-3.1-flash-image-three-four": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR",
     },
     "gemini-3.1-flash-image-landscape-2k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K",
     },
     "gemini-3.1-flash-image-portrait-2k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K",
     },
     "gemini-3.1-flash-image-square-2k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_SQUARE",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K",
     },
     "gemini-3.1-flash-image-four-three-2k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K",
     },
     "gemini-3.1-flash-image-three-four-2k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K",
     },
     "gemini-3.1-flash-image-landscape-4k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K",
     },
     "gemini-3.1-flash-image-portrait-4k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K",
     },
     "gemini-3.1-flash-image-square-4k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_SQUARE",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K",
     },
     "gemini-3.1-flash-image-four-three-4k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K",
     },
     "gemini-3.1-flash-image-three-four-4k": {
         "type": "image",
-        "model_name": "NARWHAL",
+        "model_name": "BELUGA",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR",
         "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K",
     },
@@ -1125,21 +1114,28 @@ def _apply_current_flow_model_catalog():
     for config_entry in MODEL_CONFIG.values():
         config_entry["listed"] = False
 
-    # NARWHAL remains the current image-generation RPC model. Older image
-    # aliases continue to resolve but no longer clutter the public catalog.
-    for model_id, config_entry in MODEL_CONFIG.items():
-        if (
-            config_entry.get("type") == "image"
-            and config_entry.get("model_name") == "NARWHAL"
-        ):
-            config_entry["listed"] = True
-            config_entry["display_name"] = "Flow Image - NARWHAL"
-
     def register(model_id: str, config_entry: Dict[str, Any], display_name: str):
         config_entry = dict(config_entry)
         config_entry["listed"] = True
         config_entry["display_name"] = display_name
         MODEL_CONFIG[model_id] = config_entry
+
+    image_variants = [
+        (model_id, dict(entry)) for model_id, entry in MODEL_CONFIG.items()
+        if entry.get("type") == "image"
+        and model_id.startswith("gemini-3.1-flash-image-")
+        and entry.get("model_name") == "BELUGA"
+    ]
+    for model_id, entry in image_variants:
+        entry["model_name"] = "BELUGA"
+        register(model_id, entry, "Nano Banana 2.1")
+        lite_entry = dict(entry)
+        lite_entry["model_name"] = "HARBOR_SEAL"
+        register(
+            model_id.replace("gemini-3.1-flash-image-", "gemini-3.1-flash-lite-image-", 1),
+            lite_entry,
+            "Nano Banana 2 Lite",
+        )
 
     def t2v(model_key: str, aspect_ratio: str) -> Dict[str, Any]:
         return _make_t2v_config(

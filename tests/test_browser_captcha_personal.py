@@ -9,7 +9,6 @@ from urllib.parse import urlencode
 
 from src.core.config import config
 from src.services.flow_client import FlowClient
-from src.services.flow_current import CurrentFlowClientMixin
 from src.services.browser_captcha_personal import (
     NativeGenerationOutcomeUnknownError,
     PERSONAL_TRUSTED_RECAPTCHA_HOOK_SOURCE,
@@ -173,7 +172,9 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.service._uses_native_harvest("CHAT_GENERATION"))
 
             strategy.return_value = "harvest"
-            self.assertTrue(self.service._uses_native_harvest("IMAGE_GENERATION"))
+            self.assertTrue(self.service._uses_native_harvest("CHAT_GENERATION"))
+            for action in ("IMAGE_GENERATION", "VIDEO_GENERATION", "UPLOAD_IMAGE"):
+                self.assertFalse(self.service._uses_native_harvest(action))
 
             strategy.return_value = "auto"
             resident_info = ResidentTabInfo(object(), "slot-auto")
@@ -387,254 +388,90 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bundle["slot_id"], "legacy:FLOW-SESSION-LEGACY")
         self.assertEqual(bundle["session_id"], "FLOW-SESSION-LEGACY")
 
-    async def test_personal_image_generation_uses_stream_chat_transport(self):
-        client = object.__new__(CurrentFlowClientMixin)
+    def _image_rpc_client(self):
+        client = FlowClient(None)
         client._frontend_cookie = AsyncMock()
-        client._get_runtime_config = lambda: types.SimpleNamespace(
-            flow_max_retries=1,
-            flow_image_request_timeout=90,
-        )
-        client._resolve_flow_frontend_cookie_storage = AsyncMock(
-            return_value="SID=session-cookie"
-        )
-        client._build_flow_frontend_project_page_url = (
-            lambda project_id: f"https://flow.google.com/project/{project_id}"
-        )
-        client._extract_browser_captcha_session_id = (
-            FlowClient._extract_browser_captcha_session_id
-        )
-        client._get_recaptcha_token = AsyncMock(
-            return_value=("captcha-token", "personal:FLOW-SESSION-1")
-        )
-        client._call_flow_stream_chat = AsyncMock(
-            return_value={
-                "mediaIds": ["11111111-1111-1111-1111-111111111111"],
-                "rawLength": 100,
-            }
-        )
-        client.get_media = AsyncMock(
-            return_value={
-                "image": {
-                    "generatedImage": {
-                        "fifeUrl": "https://flow.google.com/image/media-1"
-                    }
-                }
-            }
-        )
-        client._notify_browser_captcha_request_finished = AsyncMock()
-        client._parse_batchexecute_frames = FlowClient._parse_batchexecute_frames
-        client._extract_stream_chat_media_ids = (
-            FlowClient._extract_stream_chat_media_ids
-        )
-        client._set_request_fingerprint = MagicMock()
-        media_payload = [
-            ["media_id", [None, None, "11111111-1111-1111-1111-111111111111"]]
-        ]
-        native_frame = json.dumps([["wrb.fr", None, json.dumps(media_payload)]])
-        client._personal_browser_service = types.SimpleNamespace(
-            submit_native_stream_chat=AsyncMock(),
-            generate_native_image=AsyncMock(
-                return_value={
-                    "session_id": "FLOW-SESSION-1",
-                    "responseText": native_frame,
-                    "rawLength": len(native_frame),
-                    "fingerprint": {"user_agent": "Chrome"},
-                }
-            ),
-        )
-
-        with patch.object(
-            type(config), "captcha_method", new_callable=PropertyMock
-        ) as captcha_method:
-            captcha_method.return_value = "personal"
-            result, session_id, trace = await client.generate_image(
-                at="at-token",
-                project_id="project-1",
-                prompt="a red apple",
-                model_name="NARWHAL",
-                aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
-            )
-
-        self.assertEqual(session_id, "FLOW-SESSION-1")
-        self.assertEqual(result["frontendRpc"], "StreamChat")
-        self.assertTrue(trace["final_success_attempt"])
-        client._get_recaptcha_token.assert_not_awaited()
-        client._personal_browser_service.generate_native_image.assert_awaited_once()
-        client._personal_browser_service.submit_native_stream_chat.assert_not_awaited()
-        client._notify_browser_captcha_request_finished.assert_awaited_once_with(
-            "personal:FLOW-SESSION-1"
-        )
-
-    async def test_personal_direct_strategy_uses_atomic_native_service(self):
-        client = object.__new__(CurrentFlowClientMixin)
-        client._frontend_cookie = AsyncMock()
-        client._get_runtime_config = lambda: types.SimpleNamespace(
-            flow_max_retries=1,
-            flow_image_request_timeout=90,
-        )
-        client._resolve_flow_frontend_cookie_storage = AsyncMock(
-            return_value="SID=session-cookie"
-        )
-        client._build_flow_frontend_project_page_url = (
-            lambda project_id: f"https://flow.google.com/project/{project_id}"
-        )
-        client._extract_browser_captcha_session_id = (
-            FlowClient._extract_browser_captcha_session_id
-        )
-        client._get_recaptcha_token = AsyncMock(
-            return_value=("captcha-token", "personal:FLOW-DIRECT-SESSION")
-        )
-        client._call_flow_stream_chat = AsyncMock(
-            return_value={"mediaIds": ["media-1"], "rawLength": 100}
-        )
-        client.get_media = AsyncMock(
-            return_value={
-                "image": {
-                    "generatedImage": {
-                        "fifeUrl": "https://flow.google.com/image/media-1"
-                    }
-                }
-            }
-        )
-        client._notify_browser_captcha_request_finished = AsyncMock()
-        client._set_request_fingerprint = MagicMock()
-        client._parse_batchexecute_frames = FlowClient._parse_batchexecute_frames
-        client._extract_stream_chat_media_ids = (
-            FlowClient._extract_stream_chat_media_ids
-        )
-        media_id = "22222222-2222-2222-2222-222222222222"
-        media_payload = [["media_id", [None, None, media_id]]]
-        native_frame = json.dumps([["wrb.fr", None, json.dumps(media_payload)]])
-        client._personal_browser_service = types.SimpleNamespace(
-            generate_native_image=AsyncMock(
-                return_value={
-                    "session_id": "FLOW-DIRECT-SESSION",
-                    "responseText": native_frame,
-                    "rawLength": len(native_frame),
-                    "fingerprint": {"user_agent": "Chrome"},
-                }
-            )
-        )
-
-        with (
-            patch.object(
-                type(config), "captcha_method", new_callable=PropertyMock
-            ) as captcha_method,
-            patch.object(
-                type(config), "personal_solve_strategy", new_callable=PropertyMock
-            ) as solve_strategy,
-        ):
-            captcha_method.return_value = "personal"
-            solve_strategy.return_value = "direct"
-            result, session_id, trace = await client.generate_image(
-                at="at-token",
-                project_id="project-1",
-                prompt="a red apple",
-                model_name="NARWHAL",
-                aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
-            )
-
-        self.assertEqual(session_id, "FLOW-DIRECT-SESSION")
-        self.assertEqual(result["frontendRpc"], "StreamChat")
-        self.assertTrue(trace["final_success_attempt"])
-        client._get_recaptcha_token.assert_not_awaited()
-        client._personal_browser_service.generate_native_image.assert_awaited_once()
-        client._notify_browser_captcha_request_finished.assert_awaited_once_with(
-            "personal:FLOW-DIRECT-SESSION"
-        )
-
-    async def test_personal_nondefault_image_uses_third_party_rpc(self):
-        client = object.__new__(CurrentFlowClientMixin)
-        client._frontend_cookie = AsyncMock()
-        client._get_runtime_config = lambda: types.SimpleNamespace(
-            flow_max_retries=1,
-            flow_image_request_timeout=90,
-        )
-        client._resolve_flow_frontend_cookie_storage = AsyncMock(
-            return_value="SID=session-cookie"
-        )
-        client._build_flow_frontend_project_page_url = (
-            lambda project_id: f"https://flow.google.com/project/{project_id}"
-        )
-        client._resolve_batchexecute_captcha_override = MagicMock(
-            return_value="yescaptcha"
-        )
-        client._get_recaptcha_token = AsyncMock(
-            return_value=("captcha-token", None)
-        )
-        client._build_frontend_image_generation_argument = MagicMock(
-            return_value=["rpc-argument"]
-        )
+        client._get_runtime_config = lambda: types.SimpleNamespace(flow_max_retries=3, flow_image_request_timeout=90)
+        client._resolve_flow_frontend_cookie_storage = AsyncMock(return_value="SID=session-cookie")
+        client._get_recaptcha_token = AsyncMock(return_value=("captcha-token", None))
         client._current_rpc = AsyncMock(return_value=["rpc-result"])
-        client._normalize_frontend_image_generation_response = MagicMock(
-            return_value={"media": []}
-        )
+        client._normalize_frontend_image_generation_response = MagicMock(return_value={"media": []})
         client._notify_browser_captcha_request_finished = AsyncMock()
-        client._personal_browser_service = types.SimpleNamespace(
-            generate_native_image=AsyncMock()
-        )
+        client._handle_retryable_generation_error = AsyncMock(return_value=True)
+        client._call_flow_stream_chat = AsyncMock()
+        client._personal_browser_service = types.SimpleNamespace(generate_native_image=AsyncMock())
+        return client
 
-        with patch.object(
-            type(config), "captcha_method", new_callable=PropertyMock
-        ) as captcha_method:
-            captcha_method.return_value = "personal"
+    async def test_personal_image_generation_preserves_explicit_model(self):
+        client = self._image_rpc_client()
+        with patch.object(type(config), "captcha_method", new_callable=PropertyMock, return_value="personal"):
+            _, session_id, trace = await client.generate_image(
+                at="at-token", project_id="project-1", prompt="a red apple",
+                model_name="NARWHAL", aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
+            )
+        request = client._current_rpc.call_args.kwargs["argument"][1][0]
+        self.assertEqual(request[5], "BELUGA")
+        self.assertEqual(request[12], session_id)
+        self.assertEqual(trace["generation_attempts"][0]["image_model_name"], "BELUGA")
+        client._personal_browser_service.generate_native_image.assert_not_awaited()
+        client._call_flow_stream_chat.assert_not_awaited()
+        client._notify_browser_captcha_request_finished.assert_awaited_once_with(None)
+
+    async def test_personal_direct_strategy_keeps_captcha_and_submission_separate(self):
+        client = self._image_rpc_client()
+        with (
+            patch.object(type(config), "captcha_method", new_callable=PropertyMock, return_value="personal"),
+            patch.object(type(config), "personal_solve_strategy", new_callable=PropertyMock, return_value="direct"),
+        ):
             await client.generate_image(
-                at="at-token",
-                project_id="project-1",
-                prompt="edit the reference",
-                model_name="NARWHAL",
-                aspect_ratio="IMAGE_ASPECT_RATIO_PORTRAIT",
+                at="at-token", project_id="project-1", prompt="a red apple",
+                model_name="BELUGA", aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
+            )
+        self.assertIsNone(client._get_recaptcha_token.call_args.kwargs.get("method_override"))
+        self.assertEqual(client._get_recaptcha_token.call_args.kwargs["action"], "IMAGE_GENERATION")
+        client._personal_browser_service.generate_native_image.assert_not_awaited()
+        client._current_rpc.assert_awaited_once()
+
+    async def test_personal_nondefault_image_preserves_reference_and_ratio(self):
+        client = self._image_rpc_client()
+        with patch.object(type(config), "captcha_method", new_callable=PropertyMock, return_value="personal"):
+            await client.generate_image(
+                at="at-token", project_id="project-1", prompt="edit the reference",
+                model_name="BELUGA", aspect_ratio="IMAGE_ASPECT_RATIO_PORTRAIT",
                 image_inputs=[{"mediaId": "reference-1"}],
             )
-
+        request = client._current_rpc.call_args.kwargs["argument"][1][0]
+        self.assertEqual(request[4], 2)
+        self.assertEqual(request[2], [["reference-1", None, None, None, 1]])
+        self.assertIsNone(client._get_recaptcha_token.call_args.kwargs.get("method_override"))
         client._personal_browser_service.generate_native_image.assert_not_awaited()
-        self.assertEqual(
-            client._get_recaptcha_token.await_args.kwargs["method_override"],
-            "yescaptcha",
-        )
-        build_kwargs = client._build_frontend_image_generation_argument.call_args.kwargs
-        self.assertEqual(
-            build_kwargs["aspect_ratio"], "IMAGE_ASPECT_RATIO_PORTRAIT"
-        )
-        self.assertEqual(build_kwargs["image_inputs"], [{"mediaId": "reference-1"}])
 
-    async def test_personal_unknown_native_outcome_is_not_retried(self):
-        client = object.__new__(CurrentFlowClientMixin)
-        client._frontend_cookie = AsyncMock()
-        client._get_runtime_config = lambda: types.SimpleNamespace(
-            flow_max_retries=3,
-            flow_image_request_timeout=90,
-        )
-        client._resolve_flow_frontend_cookie_storage = AsyncMock(
-            return_value="SID=session-cookie"
-        )
-        client._notify_browser_captcha_request_finished = AsyncMock()
-        client._personal_browser_service = types.SimpleNamespace(
-            generate_native_image=AsyncMock(
-                side_effect=NativeGenerationOutcomeUnknownError(
-                    "native generation outcome is unknown"
-                )
-            )
-        )
-
-        with patch.object(
-            type(config), "captcha_method", new_callable=PropertyMock
-        ) as captcha_method:
-            captcha_method.return_value = "personal"
-            with self.assertRaisesRegex(
-                NativeGenerationOutcomeUnknownError, "outcome is unknown"
-            ):
+    async def test_personal_unknown_image_rpc_outcome_is_not_retried(self):
+        client = self._image_rpc_client()
+        client._current_rpc.side_effect = NativeGenerationOutcomeUnknownError("generation outcome is unknown")
+        with patch.object(type(config), "captcha_method", new_callable=PropertyMock, return_value="personal"):
+            with self.assertRaisesRegex(NativeGenerationOutcomeUnknownError, "outcome is unknown"):
                 await client.generate_image(
-                    at="at-token",
-                    project_id="project-1",
-                    prompt="a red apple",
-                    model_name="NARWHAL",
-                    aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
+                    at="at-token", project_id="project-1", prompt="a red apple",
+                    model_name="BELUGA", aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
                 )
+        client._get_recaptcha_token.assert_awaited_once()
+        client._current_rpc.assert_awaited_once()
+        client._handle_retryable_generation_error.assert_not_awaited()
+        client._personal_browser_service.generate_native_image.assert_not_awaited()
 
-        self.assertEqual(
-            client._personal_browser_service.generate_native_image.await_count, 1
-        )
+    async def test_nonchat_direct_failure_does_not_harvest_chat_token(self):
+        for action in ("IMAGE_GENERATION", "VIDEO_GENERATION", "UPLOAD_IMAGE"):
+            with self.subTest(action=action):
+                info = ResidentTabInfo(object(), "slot", project_id="project")
+                self.service._execute_recaptcha_on_tab = AsyncMock(return_value=None)
+                self.service._execute_native_harvest_on_tab = AsyncMock(return_value={"token": "wrong-action"})
+                with patch.object(type(config), "personal_solve_strategy", new_callable=PropertyMock, return_value="auto"):
+                    token = await self.service._solve_with_resident_tab(
+                        "slot", "project", info, action, success_label="solve",
+                    )
+                self.assertIsNone(token)
+                self.service._execute_native_harvest_on_tab.assert_not_awaited()
 
     async def test_atomic_native_auto_prefers_direct_submission(self):
         resident_info = ResidentTabInfo(object(), "slot-1", project_id="project-1")
@@ -898,7 +735,7 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
                 "slot-1",
                 "project-1",
                 resident_info,
-                "IMAGE_GENERATION",
+                "CHAT_GENERATION",
                 success_label="unit_test",
             )
 

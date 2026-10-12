@@ -112,6 +112,60 @@ class BrowserCaptchaTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected, 1)
 
+    def test_google_cookie_targets_use_valid_playwright_scope(self):
+        cookies = TokenBrowser._build_google_cookie_targets("OSID=dummy")
+        self.assertTrue(cookies)
+        for cookie in cookies:
+            self.assertFalse("url" in cookie and "path" in cookie)
+            self.assertTrue(cookie["url"].endswith("/"))
+
+    def test_host_cookie_keeps_its_original_origin(self):
+        cookies = TokenBrowser._build_google_cookie_targets(json.dumps([
+            {"name": "__Host-auth", "value": "dummy", "domain": "accounts.google.com", "path": "/"}
+        ]))
+        self.assertEqual(cookies[0]["url"], "https://accounts.google.com/")
+        self.assertNotIn("path", cookies[0])
+        self.assertTrue(cookies[0]["secure"])
+        self.assertNotIn("domain", cookies[0])
+
+    def test_host_only_cookie_keeps_nonroot_path(self):
+        cookies = TokenBrowser._build_google_cookie_targets(json.dumps([
+            {"name": "session", "value": "dummy", "domain": ".flow.google.com", "hostOnly": True, "path": "/private"}
+        ]))
+        self.assertEqual(cookies[0]["url"], "https://flow.google.com/")
+        self.assertNotIn("domain", cookies[0])
+        self.assertEqual(cookies[0]["path"], "/private")
+
+    def test_explicit_domain_cookie_keeps_subdomain_scope(self):
+        cookies = TokenBrowser._build_google_cookie_targets(json.dumps([
+            {"name": "session", "value": "dummy", "domain": "google.com", "hostOnly": False, "path": "/"}
+        ]))
+        self.assertEqual(cookies[0]["domain"], "google.com")
+        self.assertEqual(cookies[0]["path"], "/")
+        self.assertNotIn("url", cookies[0])
+
+    async def test_nonroot_cookie_import_closes_cdp_resources(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                browser = object.__new__(TokenBrowser)
+                browser.token_id = 0
+                browser._shared_bound_token_id = None
+                browser._shared_bound_cookie_signature = None
+                raw = json.dumps([{"name": "session", "value": "dummy", "domain": "flow.google.com", "path": "/private"}])
+                browser._load_token_session_binding = AsyncMock(return_value=(7, None, raw, "signature"))
+                page = types.SimpleNamespace(close=AsyncMock())
+                session = types.SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("failed") if fail else None), detach=AsyncMock())
+                context = types.SimpleNamespace(
+                    clear_cookies=AsyncMock(), add_cookies=AsyncMock(),
+                    new_page=AsyncMock(return_value=page), new_cdp_session=AsyncMock(return_value=session),
+                )
+                success = await browser._ensure_shared_token_binding(context, 7)
+                self.assertEqual(success, not fail)
+                context.add_cookies.assert_not_awaited()
+                self.assertEqual(session.send.call_args.args[0], "Network.setCookies")
+                session.detach.assert_awaited_once()
+                page.close.assert_awaited_once()
+
     async def test_warmup_binds_browser_to_active_token_credentials(self):
         service = BrowserCaptchaService(db=None)
         fake_browser = types.SimpleNamespace(
@@ -124,6 +178,17 @@ class BrowserCaptchaTests(unittest.IsolatedAsyncioTestCase):
 
         fake_browser._get_or_create_shared_browser.assert_awaited_once_with(
             token_proxy_url="http://proxy", token_id=7
+        )
+
+    async def test_warmup_without_accounts_preserves_runtime_probe(self):
+        service = BrowserCaptchaService(db=None)
+        service._get_warmup_token_specs = AsyncMock(return_value=[])
+        service._warmup_browser_slot = AsyncMock()
+
+        await service.warmup_browser_slots()
+
+        service._warmup_browser_slot.assert_awaited_once_with(
+            0, token_id=None, token_proxy_url=None
         )
 
     async def test_warmup_skips_already_bound_slot(self):

@@ -209,7 +209,6 @@ class FlowFrontendMixin:
             None,
             None,
             None,
-            None,
             session_id,
             str(uuid.uuid4()).upper(),
         ]
@@ -722,7 +721,7 @@ class FlowFrontendMixin:
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
             "Cookie": rpc_cookie_header,
             "Origin": "https://flow.google.com",
-            "Referer": f"https://flow.google.com{resolved_source_path}",
+            "Referer": "https://flow.google.com/",
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
@@ -731,7 +730,11 @@ class FlowFrontendMixin:
         f_request = self._compact_json_dumps(
             [[[rpc_id, self._compact_json_dumps(argument), None, "generic"]]]
         )
-        request_body = urlencode({"f.req": f_request})
+        request_fields = {"f.req": f_request}
+        at_token = self._extract_stream_chat_at_token(bootstrap_text)
+        if at_token:
+            request_fields["at"] = at_token
+        request_body = urlencode(request_fields)
         response_text = await self._make_text_request(
             method="POST",
             url=url,
@@ -742,13 +745,14 @@ class FlowFrontendMixin:
             return_error_response=True,
             redact_sensitive_logs=True,
         )
-        xsrf_match = re.search(r'\["xsrf","([^"]+)"', response_text)
+        xsrf_match = re.search(r'\["xsrf"\s*,\s*"((?:\\.|[^"\\])*)"', response_text)
         if xsrf_match:
+            request_fields["at"] = json.loads('"' + xsrf_match.group(1) + '"')
             response_text = await self._make_text_request(
                 method="POST",
                 url=url,
                 headers=headers,
-                raw_body=request_body + "&at=" + quote(xsrf_match.group(1), safe=""),
+                raw_body=urlencode(request_fields),
                 timeout=timeout,
                 apply_default_client_headers=False,
                 return_error_response=True,
@@ -766,12 +770,15 @@ class FlowFrontendMixin:
     def _extract_stream_chat_at_token(bootstrap_text: str) -> str:
         """从 bootstrap HTML 提取 WIZ_global_data.SNlM0e（XSRF at token）。"""
         for pattern in (
-            r'"SNlM0e":"([^"]+)"',
+            r'"SNlM0e"\s*:\s*"((?:\\.|[^"\\])+)"',
             r"SNlM0e['\"]?\s*[:=]\s*['\"]([A-Za-z0-9_:\-.]+)['\"]",
         ):
             match = re.search(pattern, bootstrap_text)
             if match:
-                return match.group(1)
+                try:
+                    return json.loads('"' + match.group(1) + '"')
+                except ValueError:
+                    return match.group(1)
         return ""
 
     def _build_stream_chat_request(

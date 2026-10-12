@@ -32,6 +32,7 @@ from ..core.browser_runtime_status import (
     progress_runtime_prepare,
 )
 from ..core.config import config
+from .recaptcha_runtime import TRUSTED_RECAPTCHA_HOOK_SOURCE, build_recaptcha_execute_script
 from .browser_cookie_utils import build_browser_cookie_targets, build_cookie_signature
 
 
@@ -1198,7 +1199,7 @@ class TokenBrowser:
     @classmethod
     def _build_google_cookie_targets(cls, cookie_storage: str) -> List[Dict[str, Any]]:
         """按浏览器 Cookie 作用域展开登录态，兼容 JSON 与 Header 格式。"""
-        return build_browser_cookie_targets(
+        cookies = build_browser_cookie_targets(
             cookie_storage,
             default_url="https://flow.google.com/",
             fallback_urls=[
@@ -1206,6 +1207,14 @@ class TokenBrowser:
                 "https://www.google.com/",
             ],
         )
+        # URL cookies retain host-only scope. Root paths can use Playwright's
+        # URL form; nonroot paths are imported through CDP without widening scope.
+        for cookie in cookies:
+            if cookie.get("url") and cookie.get("path") == "/":
+                parsed = urlparse(cookie["url"])
+                cookie["url"] = f"{parsed.scheme}://{parsed.netloc}/"
+                cookie.pop("path")
+        return cookies
 
     @classmethod
     def _build_token_session_cookie_targets(
@@ -1303,7 +1312,27 @@ class TokenBrowser:
 
         try:
             await context.clear_cookies()
-            await context.add_cookies(browser_cookies)
+            scoped_cookies = []
+            regular_cookies = []
+            for cookie in browser_cookies:
+                target = scoped_cookies if cookie.get("url") and "path" in cookie else regular_cookies
+                target.append(cookie)
+            if regular_cookies:
+                await context.add_cookies(regular_cookies)
+            if scoped_cookies:
+                page = await context.new_page()
+                session = None
+                try:
+                    session = await context.new_cdp_session(page)
+                    await session.send("Network.setCookies", {"cookies": scoped_cookies})
+                finally:
+                    if session:
+                        try:
+                            await session.detach()
+                        finally:
+                            await page.close()
+                    else:
+                        await page.close()
             self._shared_bound_token_id = token_key
             self._shared_bound_cookie_signature = cookie_signature
             debug_logger.log_info(
@@ -2144,18 +2173,8 @@ class TokenBrowser:
     async def _execute_captcha(
         self, context, project_id: str, website_key: str, action: str
     ) -> Optional[str]:
-        """通过页面原生提交流程获取 reCAPTCHA token（harvest 模式）。
-
-        新版 flow.google.com 的 reCAPTCHA Enterprise 会把页面外部调用
-        （page.evaluate / 扩展上下文）标记为 extension_hijack_detected，
-        这类 token 会被生成接口以 UNUSUAL_ACTIVITY 拒绝。因此不再直接调用
-        grecaptcha.enterprise.execute，而是驱动页面自身提交一次生成：
-        1. 打开项目页并处理引导弹窗；
-        2. 在 ProseMirror 输入框输入占位提示词并点击 Start generation，
-           页面在自己的调用上下文中 execute 出无标记 token；
-        3. route 拦截 StreamChat 请求，提取 token 与会话 id 后 abort，
-           请求不会发往服务端，token 保持未消费状态供主程序提交使用。
-        """
+        """Solve the requested action; native harvest is reserved for StreamChat."""
+        normalized_action = str(action or "IMAGE_GENERATION").strip().upper()
         page = None
         self._harvest_streamchat_post = None
         self._last_harvest_session_id = None
@@ -2169,6 +2188,8 @@ class TokenBrowser:
             await page.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             )
+            if normalized_action != "CHAT_GENERATION":
+                await page.add_init_script(TRUSTED_RECAPTCHA_HOOK_SOURCE)
             ready = await self._prepare_flow_runtime_page(
                 page,
                 project_id,
@@ -2181,6 +2202,17 @@ class TokenBrowser:
                     f"[BrowserCaptcha] Token-{self.token_id} harvest 页面未就绪: "
                     f"url={page.url[:80]}"
                 )
+                return None
+
+            if normalized_action != "CHAT_GENERATION":
+                result = await asyncio.wait_for(
+                    page.evaluate(build_recaptcha_execute_script(website_key, normalized_action, 25000)),
+                    timeout=40,
+                )
+                if isinstance(result, dict) and result.get("ok"):
+                    return str(result.get("token") or "").strip() or None
+                reason = str(result.get("error") or "empty token")[:240] if isinstance(result, dict) else "invalid result"
+                debug_logger.log_warning(f"[BrowserCaptcha] reCAPTCHA execute 未返回有效 token: {reason}")
                 return None
 
             harvest_result = await asyncio.wait_for(
@@ -3459,7 +3491,7 @@ class BrowserCaptchaService:
             token_id: (token_id, token_proxy_url)
             for token_id, token_proxy_url in token_specs
         }
-        warmup_targets: List[Tuple[int, Optional[str]]] = []
+        warmup_targets: List[Tuple[int, Optional[Tuple[int, Optional[str]]]]] = []
 
         async with self._browsers_lock:
             if token_spec_by_id:
@@ -3490,8 +3522,8 @@ class BrowserCaptchaService:
         tasks = [
             self._warmup_browser_slot(
                 browser_id,
-                token_id=spec[0],
-                token_proxy_url=spec[1],
+                token_id=spec[0] if spec is not None else None,
+                token_proxy_url=spec[1] if spec is not None else None,
             )
             for browser_id, spec in warmup_targets
         ]
