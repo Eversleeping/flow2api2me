@@ -27,6 +27,20 @@
 </tr>
 </table>
 
+<table>
+<tr>
+<td width="180" align="center" valign="middle">
+  <a href="https://proxylane.dev/?utm_source=flow2api&utm_medium=partnership&utm_campaign=flow2api_sponsor_202610&utm_content=github_readme">
+    <img src="static/sponsors/proxylane-flow2api.png" alt="ProxyLane" width="150">
+  </a>
+</td>
+<td valign="top">
+  感谢 <strong>ProxyLane</strong> 赞助了本项目！ProxyLane 是住宅代理服务，覆盖 195 个国家，95%+ IP 获 Scamalytics 低风险评级，支持 HTTP / SOCKS5 和账号密码认证。在 Token 的「协议代理」「打码代理」或全局「请求代理地址」里填入代理，用户名中写上城市和会话名，每个 Token 最长 72 小时使用同一个住宅 IP，换 IP 也留在同一城市。中文界面，支持 USDT 付款，首次购买使用优惠码 <strong>FLOW2API30</strong> 享 7 折，通过<a href="https://proxylane.dev/?utm_source=flow2api&utm_medium=partnership&utm_campaign=flow2api_sponsor_202610&utm_content=github_readme">此链接</a>注册即可。<br><br>
+  Thanks to <strong>ProxyLane</strong> for sponsoring this project! ProxyLane is a residential proxy service in 195 countries, with 95%+ of IPs rated low risk by Scamalytics and HTTP / SOCKS5 with username and password. Put the proxy into a Token's protocol or captcha proxy, or into the global request proxy, with a city and a session name in the username: each Token keeps one residential IP for up to 72 hours, and a replacement IP stays in the same city. New customers get 30% off the first purchase with code <strong>FLOW2API30</strong>. <a href="https://proxylane.dev/?utm_source=flow2api&utm_medium=partnership&utm_campaign=flow2api_sponsor_202610&utm_content=github_readme_en">Sign up here</a> to get started.
+</td>
+</tr>
+</table>
+
 ## ✨ 核心特性
 
 - 🎨 **文生图** / **图生图**
