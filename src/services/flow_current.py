@@ -520,9 +520,18 @@ class CurrentFlowClientMixin:
     ) -> dict:
         await self._frontend_cookie(google_cookies, token_id)
         max_retries = max(1, int(self._get_runtime_config().flow_max_retries or 1))
+        model_keys = [str(model_key or "").strip()]
+        # Flow currently exposes both relaxed and standard short-duration keys.
+        # Some Pro accounts return code=[5] for the relaxed key; retry the exact
+        # same duration/mode without the suffix before repeating the same request.
+        if "_relaxed" in model_keys[0]:
+            model_keys.append(model_keys[0].replace("_relaxed", ""))
+        attempt_budget = max(max_retries, len(model_keys))
+        fallback_model_key: Optional[str] = None
         last_error: Optional[Exception] = None
-        for retry_attempt in range(max_retries):
+        for retry_attempt in range(attempt_budget):
             browser_id = None
+            request_model_key = fallback_model_key or model_keys[0]
             try:
                 token, browser_id = await self._get_recaptcha_token(
                     project_id,
@@ -535,7 +544,7 @@ class CurrentFlowClientMixin:
                 rpc_id, argument = self._build_frontend_video_generation_argument(
                     project_id=project_id,
                     prompt=prompt,
-                    model_key=model_key,
+                    model_key=request_model_key,
                     aspect_ratio=aspect_ratio,
                     recaptcha_token=token,
                     # Protocol requests use an independent session id instead of
@@ -560,7 +569,7 @@ class CurrentFlowClientMixin:
                     payload,
                     project_id=project_id,
                     aspect_ratio=aspect_ratio,
-                    model_key=model_key,
+                    model_key=request_model_key,
                     rpc_id=rpc_id,
                 )
             except Exception as error:
@@ -568,6 +577,19 @@ class CurrentFlowClientMixin:
                 # MODEL_ACCESS_DENIED 为账号权限拒绝，重试不会改变结果
                 if "MODEL_ACCESS_DENIED" in str(error):
                     raise
+                error_text = str(error).lower()
+                is_missing_model = bool(
+                    re.search(r"code\s*=\s*\[?5\]?", error_text)
+                    or "not_found" in error_text
+                    or "not found" in error_text
+                )
+                if is_missing_model and request_model_key != model_keys[-1]:
+                    fallback_model_key = model_keys[-1]
+                    debug_logger.log_warning(
+                        "[VIDEO] Flow 未找到 relaxed 模型 key，回退同一时长标准 key: "
+                        f"{request_model_key} -> {model_keys[-1]}"
+                    )
+                    continue
                 if retry_attempt >= max_retries - 1:
                     raise
             finally:
