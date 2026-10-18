@@ -173,9 +173,9 @@ const STATE = { selectedModel: null, modelConfig: null, images: [], generating: 
 <script>
 // Model categories for sidebar
 const MODEL_CATEGORIES = {
-  "Gemini 3.1 Flash 图片": { filter: m => m.startsWith("gemini-3.1-flash-image") },
+  "Nano Banana 2.1 图片": { filter: m => m.startsWith("gemini-3.1-flash-image") },
   "Nano Banana 2 Lite 图片": { filter: m => m.startsWith("gemini-3.1-flash-lite-image") },
-  "Gemini 3.0 Pro 图片": { filter: m => m.startsWith("gemini-3.0-pro-image") },
+  "Nano Banana Pro 图片": { filter: m => m.startsWith("gemini-3.0-pro-image") },
   "Veo 3.1 文生视频 (T2V)": { filter: m => m.startsWith("veo_3_1_t2v") && !m.includes("4k") && !m.includes("1080p") },
   "Veo 3.1 图生视频 (I2V)": { filter: m => m.startsWith("veo_3_1_i2v") && !m.includes("4k") && !m.includes("1080p") },
   "Veo 3.1 多图视频 (R2V)": { filter: m => m.startsWith("veo_3_1_r2v") && !m.includes("4k") && !m.includes("1080p") },
@@ -522,6 +522,7 @@ async function generate() {
     const decoder = new TextDecoder();
     let fullContent = "";
     let buffer = "";
+    let streamError = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -539,6 +540,7 @@ async function generate() {
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) {
+            streamError = parsed.error.message || JSON.stringify(parsed.error);
             appendLog(`\n❌ 错误: ${JSON.stringify(parsed.error)}\n`);
             continue;
           }
@@ -556,6 +558,8 @@ async function generate() {
         }
       }
     }
+
+    if (streamError) throw new Error(streamError);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     appendLog(`\n\n[${new Date().toLocaleTimeString()}] 完成，耗时 ${elapsed}s\n`);

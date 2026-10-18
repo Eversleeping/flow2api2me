@@ -1,6 +1,7 @@
 import itertools
 import json
 import os
+import tempfile
 import types
 import unittest
 import uuid
@@ -85,6 +86,105 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.service = BrowserCaptchaService()
 
+    async def test_handoff_reuses_browser_and_does_not_reinject_login_cookies(self):
+        service = self.service
+        service.headless = False
+        service._extract_tab_fingerprint = AsyncMock(return_value={"user_agent": "original-agent"})
+        service._build_proxy_config_signature = AsyncMock(return_value="original-proxy")
+        service._stop_browser_process = AsyncMock()
+        service._close_tab_quietly = AsyncMock()
+        service._disconnect_connection_quietly = AsyncMock()
+        browser = types.SimpleNamespace(stopped=False, targets=[], _process=None)
+        tab = object()
+        token = types.SimpleNamespace(id=7, current_project_id="project-7", google_cookies="OSID=original")
+        with tempfile.TemporaryDirectory() as parent:
+            profile = tempfile.mkdtemp(dir=parent)
+            await service.adopt_login_browser(browser, tab, profile, token)
+            self.assertIs(service.browser, browser)
+            self.assertEqual(service._resolve_user_data_dir(), profile)
+            info = next(iter(service._resident_tabs.values()))
+            self.assertIs(info.tab, tab)
+            service._load_token_cookie = AsyncMock(return_value=token.google_cookies)
+            service._apply_token_cookie_binding = AsyncMock()
+            self.assertTrue(await service._ensure_resident_token_binding(info, token.id, label="test"))
+            service._apply_token_cookie_binding.assert_not_awaited()
+            for _ in range(20):
+                service._record_browser_solve_success(source="test")
+            self.assertFalse(service._fresh_profile_restart_pending)
+            self.assertFalse(await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60))
+            await service.close()
+            self.assertFalse(os.path.exists(profile))
+            self.assertIsNone(service._interactive_login_profile)
+
+    async def test_handoff_refuses_to_interrupt_an_active_generation(self):
+        service = self.service
+        service.headless = False
+        info = ResidentTabInfo(object(), "busy-slot")
+        service._resident_tabs[info.slot_id] = info
+        source = object()
+        service._shutdown_browser_runtime_locked = AsyncMock()
+        async with info.solve_lock:
+            with self.assertRaisesRegex(RuntimeError, "正在处理请求"):
+                await service.adopt_login_browser(source, object(), "/unused", None)
+        service._shutdown_browser_runtime_locked.assert_not_awaited()
+
+    async def test_pool_handoff_keeps_account_affinity_and_releases_reservation(self):
+        pool = _PersonalBrowserPoolService()
+        worker = types.SimpleNamespace(adopt_login_browser=AsyncMock())
+        pool._workers = [worker]
+        pool._ensure_workers = AsyncMock()
+        pool._acquire_worker = AsyncMock(return_value=(0, worker))
+        pool._release_worker_reservation = AsyncMock()
+        token = types.SimpleNamespace(id=7, current_project_id="project-7")
+        source, tab = object(), object()
+        await pool.adopt_login_browser(source, tab, "/source-profile", token)
+        worker.adopt_login_browser.assert_awaited_once_with(source, tab, "/source-profile", token)
+        pool._release_worker_reservation.assert_awaited_once_with(0)
+        self.assertEqual(pool._token_worker_affinity["7"], 0)
+
+    def test_personal_cookie_binding_preserves_flow_host_only_session(self):
+        raw = json.dumps([
+            {
+                "name": "OSID",
+                "value": "flow-session",
+                "domain": "flow.google.com",
+                "hostOnly": True,
+                "path": "/",
+                "secure": True,
+                "httpOnly": True,
+            },
+            {"name": "SID", "value": "account-session", "domain": ".google.com"},
+        ])
+        cookies = self.service._build_personal_cookie_targets(raw)
+        flow_sessions = [
+            cookie for cookie in cookies
+            if cookie["name"] == "OSID"
+            and cookie.get("url") == "https://flow.google.com/"
+        ]
+        self.assertEqual(len(flow_sessions), 1)
+        self.assertEqual(flow_sessions[0]["value"], "flow-session")
+        self.assertTrue(flow_sessions[0]["httpOnly"])
+        self.assertTrue(any(
+            cookie["name"] == "SID" and cookie.get("domain") == ".google.com"
+            for cookie in cookies
+        ))
+
+    def test_structured_cookies_never_cross_site_scopes(self):
+        raw = json.dumps([
+            {"name": "OSID", "value": "flow-session", "url": "https://flow.google.com/", "sameSite": "Lax", "secure": True},
+            {"name": "OSID", "value": "account-session", "url": "https://myaccount.google.com/", "secure": True},
+            {"name": "SID", "value": "google-session", "domain": ".google.com", "secure": True},
+        ])
+        cookies = self.service._build_personal_cookie_targets(raw)
+        self.assertEqual(len(cookies), 3)
+        self.assertEqual(cookies[0]["url"], "https://flow.google.com/")
+        self.assertEqual(cookies[0]["sameSite"], "Lax")
+        self.assertEqual(cookies[1]["url"], "https://myaccount.google.com/")
+        self.assertEqual(cookies[2]["domain"], ".google.com")
+        self.assertFalse(any(c.get("url") in {
+            "https://www.google.com/", "https://www.recaptcha.net/",
+        } for c in cookies))
+
     def test_native_harvest_parser_extracts_token_and_session(self):
         token = "0cAFcW" + ("x" * 120)
         inner = [
@@ -138,7 +238,12 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
             "cf4c4732-fd3b-4f8a-95b6-0871950a2f22",
         )
 
-    async def test_direct_chat_opens_project_page_for_trusted_closure(self):
+    async def test_direct_actions_open_project_page_for_trusted_closure(self):
+        for action in ("IMAGE_GENERATION", "VIDEO_GENERATION", "CHAT_GENERATION", "UPLOAD_IMAGE"):
+            with self.subTest(action=action):
+                await self._check_direct_action_opens_project(action)
+
+    async def _check_direct_action_opens_project(self, action):
         tab = _FakeTab(self._make_remote_object_result("token-project"))
         self.service._navigation_timeout_seconds = 1.0
         self.service._apply_trusted_recaptcha_hook = AsyncMock(return_value=True)
@@ -147,7 +252,7 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
         self.service._wait_for_recaptcha = AsyncMock(return_value=True)
 
         result = await self.service._execute_recaptcha_on_tab(
-            tab, action="CHAT_GENERATION", project_id="project-1"
+            tab, action=action, project_id="project-1"
         )
 
         self.assertEqual(result["token"], "token-project")
@@ -163,6 +268,18 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
             PERSONAL_TRUSTED_RECAPTCHA_HOOK_SOURCE,
         )
         self.assertIn("Function.prototype.bind", PERSONAL_TRUSTED_RECAPTCHA_HOOK_SOURCE)
+
+    async def test_trusted_hook_enables_page_before_registering_navigation_script(self):
+        methods = []
+
+        async def send(command):
+            methods.append(next(command)["method"])
+            return "registered"
+
+        tab = types.SimpleNamespace(send=send)
+        self.service._tab_evaluate = AsyncMock()
+        self.assertTrue(await self.service._apply_trusted_recaptcha_hook(tab, label="regression"))
+        self.assertEqual(methods, ["Page.enable", "Page.addScriptToEvaluateOnNewDocument"])
 
     def test_personal_strategy_selector_respects_explicit_modes(self):
         with patch.object(
@@ -327,40 +444,25 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cookie_text, "OSID=flow-cookie; SID=google-cookie")
         self.service.db.get_token.assert_awaited_once_with(7)
 
-    async def test_persist_context_cookies_updates_google_cookies_field(self):
+    async def test_google_warmup_never_overwrites_saved_login(self):
         resident_info = ResidentTabInfo(
-            tab=object(),
-            slot_id="slot-1",
-            token_id=7,
+            tab=_ClosableFakeTab(), slot_id="slot-1", token_id=7,
             browser_context_id="context-1",
         )
-        self.service.db = types.SimpleNamespace(update_token=AsyncMock())
-        self.service._get_browser_cookies = AsyncMock(
-            return_value=[
-                {
-                    "name": "OSID",
-                    "value": "flow-cookie",
-                    "domain": "flow.google.com",
-                    "path": "/",
-                    "secure": True,
-                }
-            ]
+        self.service.db = types.SimpleNamespace(
+            update_token=AsyncMock(), update_token_if_cookie_matches=AsyncMock(),
         )
-        self.service._load_token_cookie = AsyncMock(return_value="SID=google-cookie")
+        self.service._get_browser_cookies = AsyncMock(return_value=[
+            {"name": "OSID", "value": "stale-session", "domain": "flow.google.com"},
+        ])
+        self.service._tab_get = AsyncMock()
+        self.service._wait_for_document_ready = AsyncMock(return_value=True)
 
-        persisted = await self.service._persist_context_cookies_to_token(
-            resident_info,
-            7,
-            label="unit_test",
-        )
-
-        self.assertTrue(persisted)
-        self.service.db.update_token.assert_awaited_once()
-        args, kwargs = self.service.db.update_token.await_args
-        self.assertEqual(args, (7,))
-        self.assertIn("google_cookies", kwargs)
-        self.assertNotIn("cookie", kwargs)
-        self.assertIn("OSID", kwargs["google_cookies"])
+        self.assertTrue(await self.service._warmup_google_context_cookies(
+            resident_info, label="old_browser_after_new_login",
+        ))
+        self.service.db.update_token.assert_not_awaited()
+        self.service.db.update_token_if_cookie_matches.assert_not_awaited()
 
     async def test_close_clears_resident_tabs_when_warmup_task_attr_missing(self):
         tab = _ClosableFakeTab()

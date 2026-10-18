@@ -21,7 +21,7 @@ from .services.token_manager import TokenManager
 from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
-from .api import routes, admin
+from .api import routes, admin, browser_login
 
 
 _LOCAL_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -232,6 +232,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     print("Flow2API Shutting down...")
+    await browser_login.browser_login_service.close()
     # Stop file cache cleanup task
     await generation_handler.file_cache.stop_cleanup_task()
     # Stop auto-unban task
@@ -290,6 +291,7 @@ app.add_middleware(
 # Include routers
 app.include_router(routes.router)
 app.include_router(admin.router)
+app.include_router(browser_login.router)
 
 # Static files - serve tmp directory for cached files
 tmp_dir = Path(__file__).parent.parent / "tmp"
@@ -302,6 +304,8 @@ _STATIC_PAGE_NO_CACHE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate",
     "Pragma": "no-cache",
     "Expires": "0",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "frame-ancestors 'none'",
 }
 
 
@@ -351,6 +355,15 @@ async def test_page(request: Request):
     if test_file.exists():
         return _static_page_response(test_file)
     return HTMLResponse(content="<h1>Test Page Not Found</h1>", status_code=404)
+
+
+@app.get("/browser-login.js")
+async def browser_login_script(request: Request):
+    guard_response = _ensure_admin_page_session(request)
+    if guard_response is not None:
+        return guard_response
+    return FileResponse(static_path / "browser-login.js", media_type="application/javascript",
+                        headers=_STATIC_PAGE_NO_CACHE_HEADERS)
 
 
 @app.get("/metrics")

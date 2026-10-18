@@ -73,6 +73,21 @@
 
 - 自动推送新版 Flow 登录态的浏览器扩展：[Flow2API-Token-Updater](https://github.com/TheSmallHanCat/Flow2API-Token-Updater)。
 
+### 在后台通过浏览器登录
+
+使用已安装 Chromium 和显示环境的 headed 镜像时，可在管理后台点击 **浏览器登录**，
+或在已有账号的操作栏点击 **重新登录**。在后台显示的浏览器画面中完成 Google 登录和二次验证，
+进入 Flow 后点击 **保存登录态**。程序核对登录邮箱、使用 Flow RPC 验证 Cookie 后才保存并启用账号，
+已有账号保留原项目和配置。也可以点击 **打开 Flow** 返回项目列表后再保存。
+
+画面支持鼠标点击、滚动、键盘及粘贴；下方的输入框可将内容发送到画面内选中的输入位置。
+刷新管理页面可以恢复未关闭的窗口。每次只允许一个管理员会话使用登录窗口，最多保留 20 分钟，
+未保存时，关闭、退出后台或超时后会清理临时浏览器资料。personal 模式保存成功后，原浏览器交给打码服务继续使用，关闭弹窗不会结束它。已验证的浏览器资料保留在服务器，重启后可从同一账号的“重新登录”恢复；Google 要求重新验证时仍需本人操作。
+窗口会显示当前网页域名。登录画面和控制接口沿用后台身份验证，不需要开放远程桌面端口。
+登录浏览器关闭 Chromium 账号同步和扩展加载；Google 网站登录仍可正常使用。
+此功能属于交互式网页登录；Google 要求密码或二次验证时仍需本人操作。
+若 Google 拒绝服务器浏览器登录，可使用上述扩展同步 Cookie。
+
 ### 方式一：Docker 部署（推荐）
 
 #### 标准模式（不使用代理）
@@ -170,7 +185,7 @@ Prometheus 可直接抓 `/metrics`。如果部署到 Kubernetes，建议只在�
 
 ### 图片生成
 
-当前 `/v1/models` 与 Gemini `/models` 公开 Nano Banana 2.1 和 Nano Banana 2 Lite 两个图片系列，共 30 个比例与分辨率变体。已有 `gemini-3.1-flash-image-*` 名称继续保留，调用新版 Nano Banana 2.1（`BELUGA`）。旧 Pro 名称 `gemini-3.0-pro-image-*` 继续调用 Nano Banana Pro（`GEM_PIX_2`），但不出现在模型列表中。旧 Imagen 模型已停止支持；模型不存在时不会回退到旧上游字段。
+当前 `/v1/models` 与 Gemini `/models` 公开 Nano Banana 2.1、Nano Banana 2 Lite 和 Nano Banana Pro 三个图片系列，共 45 个比例与分辨率变体。已有 `gemini-3.1-flash-image-*` 名称继续保留，调用 Nano Banana 2.1（`BELUGA`）；`gemini-3.0-pro-image-*` 调用 Nano Banana Pro（`GEM_PIX_2`），并在模型列表中公开。旧 Imagen 模型已停止支持；模型不存在时不会回退到旧上游字段。
 
 | 当前公开名称 | 分辨率 | 比例 |
 |---|---:|---:|
@@ -191,6 +206,8 @@ Prometheus 可直接抓 `/metrics`。如果部署到 Kubernetes，建议只在�
 | `gemini-3.1-flash-image-three-four-4k` | 4K | 竖屏 3:4 |
 
 Nano Banana 2 Lite 使用 `gemini-3.1-flash-lite-image-*`，比例及分辨率后缀与上表一致，例如 `gemini-3.1-flash-lite-image-landscape`、`gemini-3.1-flash-lite-image-portrait-2k`、`gemini-3.1-flash-lite-image-square-4k`。也支持简化名称 `gemini-3.1-flash-lite-image` 搭配 `aspectRatio` / `imageSize` 参数。
+
+Nano Banana Pro 使用 `gemini-3.0-pro-image-*`，比例及分辨率后缀同上，例如 `gemini-3.0-pro-image-square`、`gemini-3.0-pro-image-landscape-2k`；也支持简化名称 `gemini-3.0-pro-image`。
 
 2K/4K 变体通过生成后的高清放大实现，不代表 Lite 原生输出这些分辨率。主程序通过图片 RPC 明确提交模型、比例和参考图；浏览器打码与第三方打码均只提供验证码。`browser` / `personal` 模式不需要第三方打码密钥，图片、上传、放大及视频请求按所需 action 获取验证码。Lite 不会自动回退到其他图片模型。
 

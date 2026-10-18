@@ -45,6 +45,11 @@ ENV/
 .DS_Store
 
 # Project specific
+config/setting.toml
+config/setting_warp.toml
+data/
+browser_data/
+browser_data_rt/
 data/*.db
 data/*.db-journal
 tmp/*

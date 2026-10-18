@@ -126,6 +126,21 @@ class ImageModelCatalogTests(unittest.TestCase):
             MODEL_CONFIG["gemini-3.0-pro-image-landscape"]["model_name"], "GEM_PIX_2"
         )
 
+    def test_pro_variants_are_discoverable_in_both_api_catalogs(self):
+        pro = {
+            name: entry
+            for name, entry in MODEL_CONFIG.items()
+            if name.startswith("gemini-3.0-pro-image-")
+        }
+        self.assertEqual(len(pro), 15)
+        openai = {entry["id"] for entry in _get_openai_model_catalog()}
+        gemini = _get_gemini_model_catalog()
+        self.assertTrue(set(pro) <= openai)
+        self.assertTrue(set(pro) <= set(gemini))
+        for entry in pro.values():
+            self.assertEqual(entry["model_name"], "GEM_PIX_2")
+            self.assertEqual(entry["display_name"], "Nano Banana Pro")
+
     def test_catalog_only_references_current_image_fields(self):
         self.assertEqual(
             {

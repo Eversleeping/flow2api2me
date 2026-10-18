@@ -1,0 +1,117 @@
+# 本机部署
+
+本实例使用 `docker-compose.deploy.yml` 和 `Dockerfile.headed` 从当前仓库构建，
+镜像为 `flow2api2me:headed`，监听 `127.0.0.1:38000`。
+宿主机 Caddy 将 `flow.maomi.xin` 代理到该地址，并自动签发与续期 HTTPS 证书。
+站点配置见 `deploy/flow.caddy`，已合并到 `/etc/caddy/Caddyfile`。
+容器启用了健康检查和 `unless-stopped` 重启策略，Docker 启动后会自动恢复未手动停止的服务。
+
+## 访问与凭据
+
+- 管理后台：`https://flow.maomi.xin/`
+- OpenAI API Base URL：`https://flow.maomi.xin/v1`
+- 健康检查：`http://127.0.0.1:38000/health`
+- 用户名：`admin`
+- 首次部署随机生成的密码与 API Key：`data/deployment-credentials.txt`，仅保存在本机，文件权限 `600`。
+
+初次配置使用 `config/setting.toml`。首次启动后，后台设置保存在 `data/flow.db`；
+后续应在管理界面修改，单独编辑 TOML 不会覆盖数据库内已有的配置。
+在后台修改密码或 API Key 后，请同步更新自己的凭据记录。
+
+## 启用生成功能
+
+1. 在后台添加 Flow 账号，填写 Google 账号邮箱和完整 Google/Flow Cookie。
+   当前版本要求 `login_account` 与 `google_cookies`；旧版单独的 access token/session token 不适用。
+   可参考 README 中的 Flow2API-Token-Updater 扩展同步登录态。
+2. 当前使用内置浏览器打码（`personal`），无需第三方打码 Key。
+   浏览器实例数为 1，单实例最大标签页为 2，配置保存在数据库中。
+3. 在 `/test` 页面测试生成。账号需能正常访问 Flow，并有对应模型权限与额度。
+
+后台现在提供 **浏览器登录** 和账号操作栏中的 **重新登录**：在页面内操作服务器浏览器，
+完成 Google 登录后进入 Flow，点击 **保存登录态** 即可自动验证并保存完整 Cookie、启用账号。
+已有账号必须登录原邮箱，原项目及生成配置会保留。刷新页面可以恢复窗口。
+登录窗口仅对创建它的管理员会话开放，最多保留 20 分钟；未保存时，关闭、退出后台或超时会清理临时资料。
+临时浏览器资料位于 `data/browser-login/`，不包含在 Docker 镜像中；未增加对外端口。
+在 personal 模式下成功保存后，原登录浏览器会交给打码服务继续使用，后台弹窗可以关闭。
+该浏览器不参与空闲回收及按次数更换空白资料。保存成功的浏览器资料按账号保留在 `data/browser-login/`，服务重启后点击对应账号的“重新登录”可尝试恢复；正在使用的资料不会同时打开，Google 要求重新验证时仍需本人操作。
+窗口显示当前网页域名，方便确认 Google 登录和 Flow 之间的跳转；不会展示或记录带参数的登录地址。
+新登录窗口只登录 Google 网站，关闭 Chromium 账号同步及扩展加载，避免同步个人扩展后弹出其他网站。
+Google 仍可能要求二次验证或拒绝服务器浏览器登录，后者可改用浏览器扩展同步。
+
+账号 Cookie 导入打码浏览器时保留原始站点作用域及 SameSite 属性；浏览器预热不会写回账号登录态。
+自动刷新必须通过账号身份与 Flow RPC 验证，并使用条件更新，避免覆盖同时保存的新登录态。
+
+当前镜像预装 Chromium、Xvfb 与 Fluxbox，设置了
+`ALLOW_DOCKER_HEADED_CAPTCHA=true` 和 `DISPLAY=:99`，可运行 `browser` / `personal`。
+`shm_size: 2gb` 是共享内存容量上限，不会预占 2GB 内存。
+容器内部使用虚拟显示，无需服务器连接显示器；未开放远程桌面端口。
+首次启动会尝试预热 Flow 页面；未预热成功时，首次请求仍需启动浏览器，可能等待数十秒。
+
+服务器可直连 Flow，默认未配置代理。如果账号或服务商需要固定出口，可在后台设置代理。
+
+域名的 DNS 应指向 `156.238.254.163`。应用端口仅在本机开放，对外通过 HTTPS 访问。
+流式 API 通过 Caddy 即时转发，未启用响应缓冲。
+
+## 运维命令
+
+在项目根目录执行：
+
+```bash
+# 构建并启动；代码更新后也使用此命令
+docker compose -f docker-compose.deploy.yml up -d --build --wait --wait-timeout 300
+
+# 查看状态
+docker compose -f docker-compose.deploy.yml ps
+
+# 查看日志
+docker compose -f docker-compose.deploy.yml logs --tail=100 -f
+
+# 重启
+docker compose -f docker-compose.deploy.yml restart
+
+# 停止并删除容器，保留挂载的数据
+docker compose -f docker-compose.deploy.yml down
+```
+
+请始终使用这份 Compose 文件，避免同时启动仓库其他 Compose 文件造成端口冲突。
+
+## 数据与备份
+
+- `data/`：SQLite 数据库及部署凭据。
+- `config/setting.toml`：初次配置。
+- `tmp/`：生成文件缓存。
+
+这些内容挂载到宿主机，重建容器会保留。备份数据库时可先停止服务，再备份上述目录，
+完成后执行 `up -d --wait` 恢复。备份包含账号 Cookie 和密钥，应妥善保管。
+真实配置和运行数据均已从 Docker 构建上下文排除。
+
+## 部署验证（2026-10-18）
+
+已验证容器为 healthy、HTTPS 证书可信、HTTP 自动跳转 HTTPS、随机密码可登录、
+默认密码被拒绝、后台会话可用、API Key 可读取 97 个模型、未认证请求被拒绝。
+图片模型包含 Nano Banana 2.1、Nano Banana 2 Lite、Nano Banana Pro 三个系列，
+每个系列有 15 个比例/分辨率变体，共 45 个图片模型。
+容器重建后仍使用原数据库配置。原有 `pic.maomi.xin` 站点返回 HTTP 200。
+
+已导入 1 个有效账号，并按用户选择切换到 `personal` 打码。
+升级前数据库一致性备份位于 `data/backups/flow-before-browser-20261018.sqlite3`。
+浏览器镜像已完成构建，Chromium（Google Chrome for Testing 156.0.8078.4）、
+Xvfb、Fluxbox 均已安装。已使用项目的 nodriver 浏览器类验证有头启动，
+并发起 Flow 页面导航；检查实例已关闭。后台环境准备状态为 `ready`，容器为 `healthy`。
+检查时整个容器内存约 898MiB，结束后空闲约 247MiB；这是单浏览器检查数据，
+并非实际生成任务的峰值。后台保留 1 个浏览器、最多 2 个标签页的配置。
+已修复内置浏览器遗漏 Flow host-only Cookie、图片/视频请求未进入项目页的问题，
+并恢复 Nano Banana Pro 模型在 API 和测试页中的展示。测试页遇到流式错误时会显示失败。
+当前版本的浏览器打码、浏览器登录、资料恢复、Cookie 刷新及上传测试共 115 项通过。
+Chromium 实测确认：注册跳转初始化脚本前必须启用 CDP Page；缺少这一步时脚本不执行。
+已修复此初始化顺序，并关闭新登录浏览器的账号同步和扩展加载。
+已从原浏览器完整资料恢复同一账号，完成 Flow 页面登录检查、RPC 验证和原浏览器交接，无需重新输入账号密码。
+最新实际调用 `gemini-3.0-pro-image-square` 成功，耗时约 27 秒，验证码自动获取成功；
+请求记录为 `completed`、进度 100%，返回 JPEG 下载为 HTTP 200（637306 字节）。
+最终图片/视频响应会在完成日志、统计和占用释放后发送，调用端收到结果后立即断开也不会使日志停留在处理中。
+已通过流式、非流式、视频、最终响应后取消的 4 项回归，以及后台处理中显示和同秒缓存更新的页面检查。
+当前容器和公网 `/health` 均正常。此前 Pro 横屏 2K 也曾实测成功；视频生成尚未实测。
+公网后台已验证 Google 登录页画面、点击、输入、退格、刷新恢复、未登录拒绝保存及关闭清理。
+Google 要求密码或二次验证时仍需账号本人操作；保留浏览器资料不能保证 Google 会话永不失效。
+本次部署前数据库备份为 `data/backups/flow-before-interactive-login-20261018.sqlite3`。
+Caddy 修改前备份为 `/etc/caddy/Caddyfile.pre-flow2api2me-20261018`。

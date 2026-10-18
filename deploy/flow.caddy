@@ -1,0 +1,5 @@
+flow.maomi.xin {
+	reverse_proxy 127.0.0.1:38000 {
+		flush_interval -1
+	}
+}

@@ -42,9 +42,9 @@ from .browser_cookie_utils import (
     build_browser_cookie_targets,
     build_cookie_signature,
     is_partitioned_cookie,
-    merge_browser_cookie_payloads,
     normalize_cookie_storage_text,
 )
+from .browser_login_profiles import retain_login_profile, is_retained_login_profile
 
 # flow2api 缺少的配置常量和函数，内联定义
 TOKEN_POOL_SIZE_MAX = 500
@@ -1645,6 +1645,7 @@ class BrowserCaptchaService:
             max_resident_tabs_override=max_resident_tabs_override,
         )
         self._runtime_ephemeral_user_data_dir: Optional[str] = None
+        self._interactive_login_profile: Optional[str] = None
         self._managed_runtime_profile_dirs: set[str] = set()
         self._browser_process_pid: Optional[int] = None
         self.user_data_dir = self._resolve_user_data_dir(self.headless)
@@ -1793,6 +1794,8 @@ class BrowserCaptchaService:
 
     def _resolve_user_data_dir(self, headless: Optional[bool] = None) -> Optional[str]:
         _ = self.headless if headless is None else bool(headless)
+        if getattr(self, "_interactive_login_profile", None):
+            return self._interactive_login_profile
         existing_runtime_profile = str(
             getattr(self, "_runtime_ephemeral_user_data_dir", "") or ""
         ).strip()
@@ -2323,6 +2326,7 @@ class BrowserCaptchaService:
             threshold > 0
             and current_count >= threshold
             and not self._fresh_profile_restart_pending
+            and not self._interactive_login_profile
         ):
             self._fresh_profile_restart_pending = True
             self._fresh_profile_restart_pending_reason = (
@@ -2745,7 +2749,7 @@ class BrowserCaptchaService:
         idle_ttl_seconds: Optional[int] = None,
         reason: str = "idle_runtime_ttl",
     ) -> bool:
-        if self._fresh_profile_restart_pending:
+        if self._fresh_profile_restart_pending or self._interactive_login_profile:
             return False
 
         try:
@@ -6803,6 +6807,8 @@ class BrowserCaptchaService:
 
                 async with self._resident_lock:
                     for slot_id, resident_info in list(self._resident_tabs.items()):
+                        if self._interactive_login_profile:
+                            continue
                         if resident_info.solve_lock.locked():
                             continue
                         idle_seconds = current_time - resident_info.last_used_at
@@ -6932,10 +6938,8 @@ class BrowserCaptchaService:
 
         说明：
         - 原始 Cookie 头没有 domain 元数据时，直接扩展到 labs/google/recaptcha 三个目标。
-        - 即使 token.google_cookies 已经带有显式的 google.com 域，也额外镜像一份到
-          `www.recaptcha.net`，保证 enterprise reload 首轮请求也能命中 cookie。
-        - 对 Google/reCAPTCHA Cookie 强制使用 `SameSite=None`
-          场景下第三方 anchor/reload 请求继续丢 cookie。
+        - 浏览器导出的结构化 Cookie 严格保留原始作用域和 SameSite 属性。
+          OSID 等站点会话不能复制到其他 Google 站点，否则可能破坏登录态。
         """
         browser_cookies = build_browser_cookie_targets(
             raw_cookie,
@@ -6943,6 +6947,9 @@ class BrowserCaptchaService:
         )
         if not browser_cookies:
             return []
+
+        if normalize_cookie_storage_text(raw_cookie)[:1] in {"[", "{"}:
+            return browser_cookies
 
         expanded: list[Dict[str, Any]] = []
         seen: set[str] = set()
@@ -6958,11 +6965,11 @@ class BrowserCaptchaService:
 
         for cookie in browser_cookies:
             scope_host = cls._extract_cookie_scope_host(cookie)
-            explicit_domain = str(cookie.get("domain") or "").strip()
             google_family_scope = cls._is_google_family_cookie_host(scope_host)
 
-            if explicit_domain or not google_family_scope:
-                append_cookie(cookie)
+            # Host-only cookies use `url` instead of `domain`. Keep that original
+            # scope too, especially Flow's OSID session cookies, before mirroring.
+            append_cookie(cookie)
 
             if not google_family_scope:
                 continue
@@ -7617,81 +7624,6 @@ class BrowserCaptchaService:
 
         return serialized
 
-    async def _persist_context_cookies_to_token(
-        self,
-        resident_info: Optional[ResidentTabInfo],
-        token_id: Optional[int],
-        *,
-        label: str,
-    ) -> bool:
-        token_key = self._normalize_token_key(token_id)
-        if (
-            resident_info is None
-            or not resident_info.tab
-            or not token_key
-            or not self.db
-        ):
-            return False
-
-        browser_context_id = (
-            resident_info.browser_context_id
-            or self._extract_tab_browser_context_id(resident_info.tab)
-        )
-        resident_info.browser_context_id = browser_context_id
-        if browser_context_id is None:
-            return False
-
-        try:
-            current_cookies = await self._get_browser_cookies(
-                label=f"context_cookie_persist_get:{label}",
-                browser_context_id=browser_context_id,
-            )
-            serialized_cookies = [
-                normalized_cookie
-                for normalized_cookie in (
-                    self._serialize_browser_cookie_for_storage(cookie)
-                    for cookie in (current_cookies or [])
-                )
-                if normalized_cookie
-            ]
-            if not serialized_cookies:
-                return False
-
-            previous_cookie_text = await self._load_token_cookie(int(token_key))
-            merged_cookie_text = merge_browser_cookie_payloads(
-                previous_cookie_text, serialized_cookies
-            )
-            if not merged_cookie_text:
-                return False
-
-            previous_storage_text = normalize_cookie_storage_text(previous_cookie_text)
-            merged_signature = self._normalize_cookie_signature(merged_cookie_text)
-
-            if previous_storage_text != merged_cookie_text:
-                await self.db.update_token(
-                    int(token_key), google_cookies=merged_cookie_text
-                )
-                debug_logger.log_info(
-                    f"[BrowserCaptcha] 已回填 context cookies 到 token.google_cookies "
-                    f"(slot={resident_info.slot_id}, token_id={token_key}, cookies={len(serialized_cookies)})"
-                )
-            else:
-                debug_logger.log_info(
-                    f"[BrowserCaptcha] context cookies 与 token.google_cookies 一致，跳过写回 "
-                    f"(slot={resident_info.slot_id}, token_id={token_key}, cookies={len(serialized_cookies)})"
-                )
-
-            if resident_info.token_id == int(token_key):
-                resident_info.cookie_signature = merged_signature
-
-            return True
-        except Exception as e:
-            debug_logger.log_warning(
-                f"[BrowserCaptcha] 回填 context cookies 到 token.google_cookies 失败 "
-                f"(slot={resident_info.slot_id}, token_id={token_key}): {e}"
-            )
-            return False
-
     async def _apply_token_cookie_binding(
         self,
         resident_info: Optional[ResidentTabInfo],
@@ -7979,11 +7911,9 @@ class BrowserCaptchaService:
                     f"[BrowserCaptcha] Google 预热返回 labs 页面未按时 ready (slot={resident_info.slot_id}, label={label})"
                 )
 
-            await self._persist_context_cookies_to_token(
-                resident_info,
-                resident_info.token_id,
-                label=f"{label}:persist",
-            )
+            # Warmup is only for this browser context. Cookie persistence goes
+            # through TokenManager's RPC validation and compare-and-swap path;
+            # this context may belong to an older login or contain mirrored cookies.
 
             debug_logger.log_info(
                 f"[BrowserCaptcha] Google 预热完成 "
@@ -9270,6 +9200,10 @@ class BrowserCaptchaService:
                 debug_logger.log_warning(
                     f"[BrowserCaptcha] 停止浏览器实例失败 ({reason}): {e}"
                 )
+        interactive_profile = self._interactive_login_profile
+        self._interactive_login_profile = None
+        if interactive_profile and not is_retained_login_profile(interactive_profile):
+            await asyncio.to_thread(shutil.rmtree, interactive_profile, True)
         await self._cleanup_runtime_profile_dirs_after_shutdown(reason=reason)
 
     async def _resolve_personal_proxy(self):
@@ -11337,6 +11271,13 @@ class BrowserCaptchaService:
             if getattr(tab, "_personal_trusted_recaptcha_hook_applied", None) is True:
                 return True
 
+            # Chromium can accept new-document scripts without running them
+            # after navigation unless Page has been enabled on this CDP session.
+            await self._run_with_timeout(
+                tab.send(cdp.page.enable()),
+                timeout_seconds=5.0,
+                label=f"page.enable:recaptcha_hook:{label}",
+            )
             await self._run_with_timeout(
                 tab.send(
                     cdp.page.add_script_to_evaluate_on_new_document(
@@ -11378,10 +11319,10 @@ class BrowserCaptchaService:
         """
         normalized_action = str(action or "IMAGE_GENERATION").strip().upper()
         normalized_project_id = str(project_id or "").strip()
-        if normalized_action != "CHAT_GENERATION" or not normalized_project_id:
-            await self._wait_for_recaptcha(tab)
 
-        if normalized_action == "CHAT_GENERATION" and normalized_project_id:
+        # The project list does not load reCAPTCHA. Every generation action
+        # needs the actual project page and its native reCAPTCHA bootstrap.
+        if normalized_project_id:
             await self._apply_trusted_recaptcha_hook(
                 tab, label=f"direct_project:{normalized_project_id}"
             )
@@ -11403,7 +11344,7 @@ class BrowserCaptchaService:
             await self._apply_trusted_recaptcha_hook(
                 tab, label=f"direct_project_ready:{normalized_project_id}"
             )
-            await self._wait_for_recaptcha(tab)
+        await self._wait_for_recaptcha(tab)
 
         execute_timeout_ms = int(max(1000, self._solve_timeout_seconds * 1000))
         script = build_recaptcha_execute_script(
@@ -14040,6 +13981,45 @@ class BrowserCaptchaService:
             cancel_idle_reaper=True, reason="service_close"
         )
 
+    async def adopt_login_browser(self, browser, tab, profile: str, token) -> None:
+        """Take ownership of the authenticated browser, without copying its session.
+
+        The caller must relinquish ownership immediately after this returns.
+        A busy worker is left untouched so ongoing generation is never interrupted.
+        """
+        if self.headless:
+            raise RuntimeError("浏览器登录交接需要 personal 有头模式")
+        async with self._tab_build_lock, self._browser_lock:
+            if self._legacy_lock.locked() or self._custom_tabs or any(
+                self._is_resident_slot_busy_for_allocation_locked(slot, info)
+                for slot, info in self._resident_tabs.items()
+            ):
+                raise RuntimeError("打码浏览器正在处理请求，请稍后再次保存登录态")
+            fingerprint = await self._extract_tab_fingerprint(tab)
+            signature = await self._build_proxy_config_signature()
+            retain_login_profile(profile, token)
+            await self._shutdown_browser_runtime_locked(reason="interactive_login_handoff")
+            self.browser = browser
+            self._interactive_login_profile = str(profile)
+            self.user_data_dir = str(profile)
+            self._initialized = True
+            self._proxy_config_signature = signature
+            self._browser_process_pid = getattr(getattr(browser, "_process", None), "pid", None)
+            self._remember_fingerprint(fingerprint)
+            self._mark_browser_health(True)
+            self._mark_runtime_active()
+            self._reset_browser_rotation_budget()
+            slot = self._next_resident_slot_id()
+            info = ResidentTabInfo(
+                tab, slot, project_id=token.current_project_id, token_id=token.id,
+            )
+            info.cookie_signature = self._normalize_cookie_signature(token.google_cookies)
+            info.fingerprint = fingerprint
+            self._resident_tabs[slot] = info
+            self._remember_token_affinity(token.id, slot, info)
+            self._remember_project_affinity(token.current_project_id, slot, info)
+            self._sync_compat_resident_state()
+
     async def open_login_window(self):
         """打开登录窗口供用户手动登录 Google"""
         await self.initialize()
@@ -15882,6 +15862,22 @@ class _PersonalBrowserPoolService:
                 debug_logger.log_warning(
                     f"[BrowserCaptchaPool] 关闭浏览器实例失败: {e}"
                 )
+
+    async def adopt_login_browser(self, browser, tab, profile: str, token) -> None:
+        await self._ensure_workers()
+        index = None
+        try:
+            index, worker = await self._acquire_worker(
+                project_id=token.current_project_id, token_id=token.id,
+                ensure_workers=False,
+            )
+            await worker.adopt_login_browser(browser, tab, profile, token)
+            self._remember_affinity(
+                project_id=token.current_project_id, token_id=token.id,
+                worker_index=index,
+            )
+        finally:
+            await self._release_worker_reservation(index)
 
     async def _get_token_direct(
         self,

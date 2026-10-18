@@ -1,0 +1,31 @@
+services:
+  flow2api:
+    build:
+      context: .
+      dockerfile: Dockerfile.headed
+    image: flow2api2me:headed
+    container_name: flow2api2me
+    init: true
+    ports:
+      - "127.0.0.1:38000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./tmp:/app/tmp
+      - ./config/setting.toml:/app/config/setting.toml
+    environment:
+      PYTHONUNBUFFERED: "1"
+      ALLOW_DOCKER_HEADED_CAPTCHA: "true"
+      DISPLAY: ":99"
+      XVFB_SCREEN: "1440x900x24"
+    shm_size: "2gb"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    restart: unless-stopped

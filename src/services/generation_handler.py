@@ -1137,6 +1137,14 @@ def _apply_current_flow_model_catalog():
             "Nano Banana 2 Lite",
         )
 
+    for model_id, entry in list(MODEL_CONFIG.items()):
+        if (
+            entry.get("type") == "image"
+            and model_id.startswith("gemini-3.0-pro-image-")
+            and entry.get("model_name") == "GEM_PIX_2"
+        ):
+            register(model_id, entry, "Nano Banana Pro")
+
     def t2v(model_key: str, aspect_ratio: str) -> Dict[str, Any]:
         return _make_t2v_config(
             model_key,
@@ -1596,6 +1604,7 @@ class GenerationHandler:
             "/"
         ) or None
         request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
+        completed_chunks = []
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -1804,7 +1813,10 @@ class GenerationHandler:
                     request_log_state=request_log_state,
                     pending_token_state=pending_token_state,
                 ):
-                    yield chunk
+                    if generation_result.get("success"):
+                        completed_chunks.append(chunk)
+                    else:
+                        yield chunk
             else:  # video
                 debug_logger.log_info(f"[GENERATION] 开始视频生成流程...")
                 async for chunk in self._handle_video_generation(
@@ -1821,7 +1833,10 @@ class GenerationHandler:
                     pending_token_state=pending_token_state,
                     video_media_id=video_media_id,
                 ):
-                    yield chunk
+                    if generation_result.get("success"):
+                        completed_chunks.append(chunk)
+                    else:
+                        yield chunk
             perf_trace["generation_pipeline_ms"] = int(
                 (time.time() - generation_pipeline_started_at) * 1000
             )
@@ -1991,6 +2006,13 @@ class GenerationHandler:
                     for_video_generation=(generation_type == "video"),
                 )
                 pending_token_state["active"] = False
+
+        # A client may close immediately on finish_reason=stop (or after a
+        # non-stream result). Finish logs, accounting and reservations before
+        # exposing that result. Keep delivery outside the cancellation handler
+        # so closing an already successful stream cannot rewrite it as failed.
+        for chunk in completed_chunks:
+            yield chunk
 
     def _get_no_token_error_message(self, generation_type: str) -> str:
         """获取无可用Token时的详细错误信息"""

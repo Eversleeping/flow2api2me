@@ -922,6 +922,8 @@ async def admin_login(request: LoginRequest, response: Response):
 @router.post("/api/admin/logout")
 async def admin_logout(response: Response, token: str = Depends(verify_admin_token)):
     """Admin logout - invalidate session token"""
+    from ..services.browser_login import browser_login_service
+    await browser_login_service.close_owner(token)
     active_admin_tokens.discard(token)
     response.delete_cookie(ADMIN_SESSION_COOKIE_NAME, path="/")
     return {"success": True, "message": "退出登录成功"}
