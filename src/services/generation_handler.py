@@ -2232,7 +2232,14 @@ class GenerationHandler:
 
                 # 4K/2K 图片重试逻辑 - 使用配置的最大重试次数
                 max_retries = config.flow_max_retries
+                upsample_attempts = []
+                upsample_error = "放大未执行：未配置有效的尝试次数"
+                if image_trace is not None:
+                    image_trace["upsample_attempts"] = upsample_attempts
                 for retry_attempt in range(max_retries):
+                    attempt_started_at = time.time()
+                    attempt_trace = {"attempt": retry_attempt + 1}
+                    upsample_attempts.append(attempt_trace)
                     try:
                         # 调用 upsample API
                         encoded_image = await self.flow_client.upsample_image(
@@ -2245,8 +2252,12 @@ class GenerationHandler:
                             token_id=token.id,
                             google_cookies=getattr(token, "google_cookies", None),
                         )
+                        attempt_trace["duration_ms"] = int(
+                            (time.time() - attempt_started_at) * 1000
+                        )
 
                         if encoded_image:
+                            attempt_trace["status"] = "success"
                             debug_logger.log_info(
                                 f"[UPSAMPLE] 图片已放大到 {resolution_name}"
                             )
@@ -2367,6 +2378,8 @@ class GenerationHandler:
                                     )
                                 return
                         else:
+                            upsample_error = "放大接口返回空结果"
+                            attempt_trace.update(status="failed", error=upsample_error)
                             debug_logger.log_warning("[UPSAMPLE] 返回结果为空")
                             if stream:
                                 yield self._create_stream_chunk(
@@ -2376,12 +2389,20 @@ class GenerationHandler:
 
                     except Exception as e:
                         error_str = str(e)
+                        upsample_error = self._normalize_error_message(e, max_length=500)
+                        attempt_trace.update(
+                            status="failed",
+                            error=upsample_error,
+                            duration_ms=int((time.time() - attempt_started_at) * 1000),
+                        )
                         debug_logger.log_error(
                             f"[UPSAMPLE] 放大失败 (尝试 {retry_attempt + 1}/{max_retries}): {error_str}"
                         )
                         
                         # 检查是否是可重试错误（403、reCAPTCHA、超时等）
                         retry_reason = self.flow_client._get_retry_reason(error_str)
+                        if retry_reason:
+                            attempt_trace["retry_reason"] = retry_reason
                         if retry_reason and retry_attempt < max_retries - 1:
                             if stream:
                                 yield self._create_stream_chunk(
@@ -2408,7 +2429,17 @@ class GenerationHandler:
                         "resolution": resolution_name,
                         "failed": True,
                         "delivery_mode": "origin_fallback",
+                        "error": upsample_error,
+                        "attempt_count": len(upsample_attempts),
                     }
+            elif upsample_resolution:
+                response_state["generated_assets"]["upscaled_image"] = {
+                    "resolution": "4K" if "4K" in upsample_resolution else "2K",
+                    "failed": True,
+                    "delivery_mode": "origin_fallback",
+                    "error": "生成结果缺少 media ID，无法提交放大请求",
+                    "attempt_count": 0,
+                }
 
             local_url = image_url
             cache_started_at = time.time()
@@ -2464,14 +2495,21 @@ class GenerationHandler:
             response_state["generated_assets"] = final_assets
             self._mark_generation_succeeded(generation_result)
 
+            warning = (
+                f"⚠️ {upscaled_marker['resolution']} 放大失败，已返回原始分辨率图片。"
+                if upscaled_marker and upscaled_marker.get("failed")
+                else None
+            )
             if stream:
                 yield self._create_stream_chunk(
-                    f"![Generated Image]({local_url})", finish_reason="stop"
+                    (f"{warning}\n\n" if warning else "")
+                    + f"![Generated Image]({local_url})", finish_reason="stop"
                 )
             else:
                 yield self._create_completion_response(
                     local_url,  # 直接传URL,让方法内部格式化
                     media_type="image",
+                    warning=warning,
                 )
 
         finally:
@@ -3328,6 +3366,7 @@ class GenerationHandler:
         content: str,
         media_type: str = "image",
         is_availability_check: bool = False,
+        warning: Optional[str] = None,
     ) -> str:
         """创建非流式响应
 
@@ -3335,6 +3374,7 @@ class GenerationHandler:
             content: 媒体URL或纯文本消息
             media_type: 媒体类型 ("image" 或 "video")
             is_availability_check: 是否为可用性检查响应 (纯文本消息)
+            warning: 媒体结果的可见提示
 
         Returns:
             JSON格式的响应
@@ -3353,6 +3393,8 @@ class GenerationHandler:
                 )
             else:  # image
                 formatted_content = f"![Generated Image]({content})"
+            if warning:
+                formatted_content = f"{warning}\n\n{formatted_content}"
 
         response = {
             "id": f"chatcmpl-{int(time.time())}",

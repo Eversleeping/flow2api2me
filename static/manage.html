@@ -1082,11 +1082,17 @@
             return responseBodyObj.url||((responseBodyObj.data&&responseBodyObj.data[0]&&responseBodyObj.data[0].url)?responseBodyObj.data[0].url:null)||(responseBodyObj.generated_assets&&responseBodyObj.generated_assets.final_video_url)||((responseBodyObj.generated_assets&&responseBodyObj.generated_assets.upscaled_image&&responseBodyObj.generated_assets.upscaled_image.local_url)?responseBodyObj.generated_assets.upscaled_image.local_url:null)||((responseBodyObj.generated_assets&&responseBodyObj.generated_assets.upscaled_image&&responseBodyObj.generated_assets.upscaled_image.url)?responseBodyObj.generated_assets.upscaled_image.url:null)||(responseBodyObj.generated_assets&&responseBodyObj.generated_assets.final_image_url)||null;
         }
 
+        function isLogUpscaleFallback(responseBodyObj){
+            const up=responseBodyObj?.generated_assets?.upscaled_image;
+            return !!up&&(up.failed===true||up.delivery_mode==='origin_fallback');
+        }
+
         function extractLogSuccessSummary(log,responseBodyObj){
             if((log&&Number(log.status_code))!==200) return '';
             if(!responseBodyObj||typeof responseBodyObj!=='object') return '生成成功，已返回结果';
             const assets=responseBodyObj.generated_assets;
             if(assets&&typeof assets==='object'&&assets.upscaled_image&&typeof assets.upscaled_image==='object'){
+                if(isLogUpscaleFallback(responseBodyObj)) return `图片已生成，但${assets.upscaled_image.resolution||'高清'}放大失败，已返回原图`;
                 return `生成成功，已返回${assets.upscaled_image.resolution||'高清'}结果`;
             }
             const directUrl=extractLogPrimaryUrl(responseBodyObj);
@@ -1251,7 +1257,8 @@
 
             if(log.status_code===200){
                 if(successSummary){
-                    detailHtml+=`<div class="space-y-2"><h4 class="font-medium text-sm text-green-700">结果摘要</h4><div class="rounded-md border border-green-200 p-3 bg-green-50"><p class="text-sm text-green-700">${escapeLogHtml(successSummary)}</p></div></div>`;
+                    const summaryTone=isLogUpscaleFallback(responseBodyObj)?'amber':'green';
+                    detailHtml+=`<div class="space-y-2"><h4 class="font-medium text-sm text-${summaryTone}-700">结果摘要</h4><div class="rounded-md border border-${summaryTone}-200 p-3 bg-${summaryTone}-50"><p class="text-sm text-${summaryTone}-700">${escapeLogHtml(successSummary)}</p></div></div>`;
                 }
                 if(responseBodyObj){
                     const directUrl=extractLogPrimaryUrl(responseBodyObj);
@@ -1267,8 +1274,12 @@
                             const up=assets.upscaled_image;
                             const upResolution=up.resolution||'放大';
                             const upPreviewUrl=up.local_url||up.url||null;
-                            assetsHtml+=`<p class="text-xs"><span class="font-medium">放大分辨率:</span> ${escapeLogHtml(upResolution)}</p>`;
-                            if(upPreviewUrl){
+                            const upFailed=isLogUpscaleFallback(responseBodyObj);
+                            assetsHtml+=`<p class="text-xs"><span class="font-medium">${upFailed?'目标放大分辨率':'放大分辨率'}:</span> ${escapeLogHtml(upResolution)}</p>`;
+                            if(upFailed){
+                                assetsHtml+=`<p class="text-xs text-amber-700">放大失败，实际返回原图</p><p class="text-xs break-all"><span class="font-medium">放大失败原因:</span> ${escapeLogHtml(up.error||'该记录未保存具体失败原因')}</p>`;
+                            }
+                            if(upPreviewUrl&&!upFailed){
                                 assetsHtml+=renderMediaPreview(`${upResolution}结果`,upPreviewUrl,!/^data:/i.test(String(upPreviewUrl||'')));
                             }
                             if(up.base64){
