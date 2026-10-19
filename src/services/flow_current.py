@@ -498,6 +498,16 @@ class CurrentFlowClientMixin:
                 ),
             )
             return self._find_media_url(payload) or self._find_encoded_media(payload)
+        except Exception as error:
+            # The handler owns retries. Report before finish clears the solve
+            # context, so recovery targets the exact account and captcha tab.
+            await self._notify_browser_captcha_error(
+                browser_id=browser_id,
+                project_id=project_id,
+                error_reason=self._get_retry_reason(str(error)),
+                error_message=str(error),
+            )
+            raise
         finally:
             await self._notify_browser_captcha_request_finished(browser_id)
 

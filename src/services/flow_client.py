@@ -4587,8 +4587,7 @@ class _FlowClientBase(FlowFrontendMixin):
     def _resolve_third_party_captcha_method(self) -> Optional[str]:
         """返回第一个已配置密钥的第三方打码方式（yescaptcha 优先）。
 
-        SPrCad 等 batchexecute RPC 只接受第三方打码 token；
-        browser/personal harvest 出的 token 会被 UNUSUAL_ACTIVITY 拒绝。
+        仅供明确选择第三方打码的调用方使用，不覆盖用户选择的浏览器模式。
         """
         for method, attr in (
             ("yescaptcha", "yescaptcha_api_key"),
@@ -4631,6 +4630,8 @@ class _FlowClientBase(FlowFrontendMixin):
         if "model_access_denied" in error_lower:
             # 账号无对应模型权限，重试不会改变结果
             return None
+        if "unusual_activity" in error_lower or "unusual activity" in error_lower:
+            return "Google 风控拒绝"
         if "403" in error_lower:
             return "403错误"
         if "429" in error_lower or "too many requests" in error_lower:
