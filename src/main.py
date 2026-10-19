@@ -140,6 +140,13 @@ async def lifespan(app: FastAPI):
         browser_service = await BrowserCaptchaService.get_instance(db)
         print("Browser captcha service initialized (nodriver mode)")
 
+        # Reuse the full retained Google browser before warming CAPTCHA tabs.
+        # A Cookie-only copy can validate RPCs yet leave Chrome on Flow's /about page.
+        for token in tokens:
+            if token.is_active and await token_manager.restore_browser_login(token.id):
+                print("Retained Google login browser restored for CAPTCHA")
+                break
+
         warmup_limit = max(
             1,
             min(
@@ -256,6 +263,7 @@ db = Database()
 proxy_manager = ProxyManager(db)
 flow_client = FlowClient(proxy_manager, db)
 token_manager = TokenManager(db, flow_client)
+flow_client._browser_session_recovery = token_manager.restore_browser_login
 concurrency_manager = ConcurrencyManager()
 load_balancer = LoadBalancer(token_manager, concurrency_manager)
 generation_handler = GenerationHandler(

@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from .browser_cookie_utils import validate_flow_cookie_storage
 from .browser_login_profiles import find_retained_login_profile, is_retained_login_profile
+from .flow_login_recovery import IDENTITY_SCRIPT, recover_flow_identity
 from ..core.config import config
 
 
@@ -323,6 +324,65 @@ class BrowserLoginService:
     async def cancel(self, session_id, owner):
         session = self._owned(session_id, owner)
         await self._dispose(session)
+
+    async def recover_saved_login(self, token, manager=None):
+        """Reuse only an idle profile belonging to this account, without an admin dialog."""
+        email = (token.login_account or token.email or "").strip().lower()
+        async with self._lock:
+            current = self._session
+            if current and current.state not in {"closed", "error"} and time.monotonic() < current.deadline:
+                return None
+            if not find_retained_login_profile(token.id, email):
+                return None
+            session = LoginSession(
+                secrets.token_urlsafe(24), "automatic-recovery", token.id, email,
+                time.monotonic() + 120,
+            )
+            try:
+                await self._launch(session)
+                if session.state != "ready":
+                    raise RuntimeError("保存的 Google 登录浏览器暂不可用，稍后重试")
+                tab = session.tab
+
+                async def navigate(url):
+                    await asyncio.wait_for(tab.get(url), 20)
+
+                async def read_identity():
+                    value = await asyncio.wait_for(tab.evaluate(
+                        f"JSON.stringify({IDENTITY_SCRIPT})", return_by_value=True,
+                    ), 5)
+                    return json.loads(value) if isinstance(value, str) else value
+
+                identity = await recover_flow_identity(navigate, read_identity, email)
+                from .browser_captcha_personal import BrowserCaptchaService
+                cookies = await asyncio.wait_for(session.browser.cookies.get_all(), 8)
+                serialized = []
+                for cookie in cookies:
+                    item = BrowserCaptchaService._serialize_browser_cookie_for_storage(cookie)
+                    if item:
+                        host = (item.get("domain") or urlparse(item.get("url", "")).hostname or "").lstrip(".")
+                        if host == "google.com" or host.endswith(".google.com"):
+                            serialized.append(item)
+                result = {
+                    "email": identity["email"],
+                    "google_cookies": json.dumps(serialized, ensure_ascii=False, separators=(",", ":")),
+                }
+                if manager is not None:
+                    # The authenticated profile can carry browser state that a Cookie
+                    # export cannot reproduce. Keep that exact browser for CAPTCHA.
+                    new_st = await manager._save_refreshed_cookies(token.id, token, result)
+                    saved_token = await manager.db.get_token(token.id)
+                    if not saved_token or saved_token.google_cookies != result["google_cookies"]:
+                        raise RuntimeError("登录态在恢复期间已更新，请稍后重试")
+                    service = await BrowserCaptchaService.get_instance(manager.db)
+                    await service.adopt_login_browser(session.browser, tab, session.profile, saved_token)
+                    session.browser = None
+                    session.tab = None
+                    session.profile = None
+                    result["_saved_st"] = new_st
+                return result
+            finally:
+                await self._dispose(session)
 
     async def _expire(self, session):
         await asyncio.sleep(max(0, session.deadline - time.monotonic()))

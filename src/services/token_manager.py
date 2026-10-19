@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, List
@@ -644,7 +645,10 @@ class TokenManager:
             at_expires_aware = token.at_expires
 
         time_until_expiry = at_expires_aware - now
-        if time_until_expiry.total_seconds() < 3600:
+        # Current Flow stores a 55-minute revalidation deadline, not an AT expiry.
+        # The legacy one-hour window would make every new snapshot immediately due.
+        refresh_window = 300 if token.at == FlowClient.FRONTEND_ACCESS_TOKEN else 3600
+        if time_until_expiry.total_seconds() < refresh_window:
             debug_logger.log_info(
                 f"[AT_CHECK] Token {token.id}: AT即将过期 "
                 f"(剩余 {time_until_expiry.total_seconds():.0f} 秒),需要刷新"
@@ -750,8 +754,23 @@ class TokenManager:
                 )
                 return False
 
+            # An RPC/server/browser failure does not prove that Google signed out.
+            # Only disable when every observed failure explicitly rejects authentication.
+            reasons = [
+                str(reason).strip().lower()
+                for reason in failure_reasons if str(reason).strip()
+            ]
+            if not reasons or not all(
+                re.search(r"\b401\b|\bunauthenticated\b|googleloginrequired|登录已失效|登录态已失效|未登录", reason)
+                for reason in reasons
+            ):
+                debug_logger.log_warning(
+                    f"[AT_REFRESH] Token {token_id}: 无法确认登录失效，保留启用状态等待重试"
+                )
+                return False
+
             debug_logger.log_error(
-                f"[AT_REFRESH] Token {token_id}: all refresh attempts failed, disabling token"
+                f"[AT_REFRESH] Token {token_id}: authentication rejected after all refresh attempts, disabling token"
             )
             await self.disable_token(token_id)
             self._clear_at_validation_cache(token_id)
@@ -810,24 +829,32 @@ class TokenManager:
                 except:
                     pass
 
-            # 更新数据库
-            await self.db.update_token(token_id, at=new_at, at_expires=new_at_expires)
-
-            debug_logger.log_info(f"[AT_REFRESH] Token {token_id}: AT刷新成功")
-            debug_logger.log_info(f"  - 新过期时间: {new_at_expires}")
-
             # 验证 AT 有效性：通过 get_credits 测试
             try:
-                credits_result = await (
-                    self._get_credits_for_token(token, new_at)
-                    if token is not None
-                    else self.flow_client.get_credits(new_at)
-                )
-                await self.db.update_token(
-                    token_id,
+                if new_at == FlowClient.FRONTEND_ACCESS_TOKEN and "credits" in result:
+                    # Current Flow st_to_at already validates the authenticated credits RPC.
+                    credits_result = result
+                else:
+                    credits_result = await (
+                        self._get_credits_for_token(token, new_at)
+                        if token is not None
+                        else self.flow_client.get_credits(new_at)
+                    )
+                updates = dict(
+                    at=new_at, at_expires=new_at_expires,
                     credits=credits_result.get("credits", 0),
                     user_paygate_tier=credits_result.get("userPaygateTier"),
                 )
+                if new_at == FlowClient.FRONTEND_ACCESS_TOKEN:
+                    updates["last_st_refresh_result"] = "success"
+                if token is not None:
+                    saved = await self.db.update_token_if_cookie_matches(
+                        token_id, token.google_cookies, **updates
+                    )
+                    if not saved:
+                        raise RuntimeError("Cookie 在刷新期间已更新，请使用最新登录态重试")
+                else:
+                    await self.db.update_token(token_id, **updates)
                 self._mark_at_valid(token_id)
                 debug_logger.log_info(
                     f"[AT_REFRESH] Token {token_id}: AT 验证成功（余额: {credits_result.get('credits', 0)}）"
@@ -848,13 +875,13 @@ class TokenManager:
                     record_token_refresh("at", "failure")
                     return False
                 else:
-                    # 其他错误（如网络问题），仍视为成功
+                    # Keep the previous deadline when validation did not succeed.
                     debug_logger.log_warning(
                         f"[AT_REFRESH] Token {token_id}: AT 验证时发生非认证错误: {error_msg}"
                     )
-                    self._last_at_refresh_error.pop(token_id, None)
-                    record_token_refresh("at", "success")
-                    return True
+                    self._last_at_refresh_error[token_id] = f"{type(verify_err).__name__}: {verify_err}"
+                    record_token_refresh("at", "failure")
+                    return False
 
         except Exception as e:
             self._last_at_refresh_error[token_id] = f"{type(e).__name__}: {e}"
@@ -959,14 +986,53 @@ class TokenManager:
             service = await BrowserCaptchaService.get_instance(self.db)
             result = await asyncio.wait_for(
                 service.refresh_google_cookies(token.current_project_id, token_id=token_id),
-                timeout=45.0,
+                timeout=75.0,
             )
             return await self._save_refreshed_cookies(token_id, token, result)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            if config.captcha_method == "personal":
+                # A service restart may leave the Google login on disk while the
+                # CAPTCHA worker starts in a fresh profile. Try the saved account too.
+                try:
+                    from .browser_login import browser_login_service
+
+                    latest = await self.db.get_token(token_id)
+                    if not latest or latest.google_cookies != token.google_cookies:
+                        return None
+                    recovered = await asyncio.wait_for(
+                        browser_login_service.recover_saved_login(token, manager=self), timeout=120.0,
+                    )
+                    if recovered:
+                        if recovered.get("_saved_st"):
+                            return recovered["_saved_st"]
+                        return await self._save_refreshed_cookies(token_id, token, recovered)
+                except Exception as recovery_exc:
+                    error = f"{type(recovery_exc).__name__}: {recovery_exc}" if str(recovery_exc) else type(recovery_exc).__name__
             await self._record_cookie_refresh_failure(token, error)
             debug_logger.log_warning(f"[COOKIE_REFRESH] Token {token_id}: 浏览器刷新失败 - {error}")
             return None
+
+    async def restore_browser_login(self, token_id: int) -> bool:
+        """Restore the actual retained browser, not only its exported Cookies."""
+        from .browser_login import browser_login_service
+
+        refresh_lock = await self._get_token_lock(
+            self._refresh_locks, self._refresh_lock_guard, token_id,
+        )
+        async with refresh_lock:
+            token = await self.db.get_token(token_id)
+            if not token or not token.is_active:
+                return False
+            try:
+                result = await asyncio.wait_for(
+                    browser_login_service.recover_saved_login(token, manager=self), timeout=120.0,
+                )
+                return bool(result and result.get("_saved_st"))
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+                await self._record_cookie_refresh_failure(token, error)
+                return False
 
     async def refresh_cookies(self, token_id: int) -> bool:
         """Explicitly renew current-Flow Cookies even when the AT marker is valid."""
@@ -996,6 +1062,9 @@ class TokenManager:
             if not latest or not latest.is_active or not latest.auto_refresh_enabled:
                 return
             if not (latest.google_cookies or "").strip():
+                return
+            last_refresh = self._as_utc(latest.last_st_refresh_at)
+            if last_refresh and now - last_refresh < timedelta(seconds=60):
                 return
             # Cookie and AT metadata are committed together after current RPC validation.
             await self._try_refresh_st(token_id, latest)
@@ -1027,8 +1096,14 @@ class TokenManager:
                 )
                 interval_minutes = self._normalize_refresh_interval(interval_minutes)
                 last_refresh = self._as_utc(token.last_st_refresh_at)
-                if last_refresh and now - last_refresh < timedelta(
-                    minutes=interval_minutes
+                # Failed attempts are retried next minute; a long configured interval
+                # must never leave a valid browser session past its revalidation deadline.
+                if last_refresh and now - last_refresh < timedelta(seconds=60):
+                    continue
+                if (
+                    not self.needs_at_refresh(token)
+                    and last_refresh
+                    and now - last_refresh < timedelta(minutes=interval_minutes)
                 ):
                     continue
 

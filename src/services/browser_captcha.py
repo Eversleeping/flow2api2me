@@ -33,6 +33,7 @@ from ..core.browser_runtime_status import (
 )
 from ..core.config import config
 from .recaptcha_runtime import TRUSTED_RECAPTCHA_HOOK_SOURCE, build_recaptcha_execute_script
+from .flow_login_recovery import IDENTITY_SCRIPT, recover_flow_identity
 from .browser_cookie_utils import build_browser_cookie_targets, build_cookie_signature, is_partitioned_cookie
 
 
@@ -3007,12 +3008,20 @@ class TokenBrowser:
                     token_proxy_url=token_proxy_url, token_id=token_id
                 )
                 page = await context.new_page()
-                response = await page.goto(
-                    "https://flow.google.com/projects", wait_until="domcontentloaded", timeout=30000
+                token = await self.db.get_token(token_id)
+                if not token:
+                    raise RuntimeError("账号已删除")
+
+                async def navigate(url):
+                    response = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    if response and response.status >= 400:
+                        raise RuntimeError(f"Flow 登录页面请求失败: HTTP {response.status}")
+
+                identity = await recover_flow_identity(
+                    navigate, lambda: page.evaluate(IDENTITY_SCRIPT),
+                    token.login_account or token.email or "",
                 )
-                if urlparse(page.url).hostname != "flow.google.com" or not response or response.status != 200:
-                    raise RuntimeError("Flow 登录已失效，请重新同步 Google Cookies")
-                email = await page.evaluate("(window.WIZ_global_data || {}).oPEP7c || ''")
+                email = identity["email"]
                 cookies = [
                     cookie for cookie in await context.cookies()
                     if not is_partitioned_cookie(cookie) and (

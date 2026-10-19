@@ -45,6 +45,7 @@ from .browser_cookie_utils import (
     normalize_cookie_storage_text,
 )
 from .browser_login_profiles import retain_login_profile, is_retained_login_profile
+from .flow_login_recovery import IDENTITY_SCRIPT, recover_flow_identity
 
 # flow2api 缺少的配置常量和函数，内联定义
 TOKEN_POOL_SIZE_MAX = 500
@@ -14061,27 +14062,22 @@ class BrowserCaptchaService:
                     raise RuntimeError("浏览器标签页绑定的 Token 不一致")
                 resident_info.recaptcha_ready = False
                 tab = resident_info.tab
-                await self._tab_get(
-                    tab, "https://flow.google.com/projects", label="cookie_refresh_page"
+                token = await self.db.get_token(token_id)
+                if not token:
+                    raise RuntimeError("账号已删除")
+
+                async def navigate(url):
+                    await self._tab_get(tab, url, label="cookie_refresh_page")
+
+                async def read_identity():
+                    return await self._tab_evaluate(
+                        tab, IDENTITY_SCRIPT, label="cookie_refresh_identity",
+                        timeout_seconds=2.0, return_by_value=True,
+                    )
+
+                identity = await recover_flow_identity(
+                    navigate, read_identity, token.login_account or token.email or "",
                 )
-                identity = None
-                for _ in range(30):
-                    try:
-                        identity = await self._tab_evaluate(
-                            tab,
-                            "({host: location.hostname, ready: document.readyState, email: (window.WIZ_global_data || {}).oPEP7c || ''})",
-                            label="cookie_refresh_identity", timeout_seconds=2.0,
-                            return_by_value=True,
-                        )
-                        if isinstance(identity, dict) and identity.get("ready") == "complete":
-                            break
-                    except Exception:
-                        identity = None
-                    await asyncio.sleep(0.3)
-                if not isinstance(identity, dict) or identity.get("ready") != "complete":
-                    raise TimeoutError("Flow Cookie 刷新页面加载超时")
-                if identity.get("host") != "flow.google.com" or not identity.get("email"):
-                    raise RuntimeError("Flow 登录已失效，请重新同步 Google Cookies")
                 cookies = await self._get_browser_cookies(
                     label="cookie_refresh_export",
                     browser_context_id=resident_info.browser_context_id,

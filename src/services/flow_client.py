@@ -5194,6 +5194,16 @@ class _FlowClientBase(FlowFrontendMixin):
                         if token
                         else None
                     )
+                recovery = getattr(self, "_browser_session_recovery", None)
+                if not token and token_id and callable(recovery):
+                    # RPC validation can succeed while a fresh Chrome profile is
+                    # still signed out. Restore the original Google browser once.
+                    if await recovery(token_id):
+                        service = await BrowserCaptchaService.get_instance(self.db)
+                        solve_bundle = await service.get_token_bundle(
+                            project_id, action, token_id=token_id,
+                        )
+                        token = str((solve_bundle or {}).get("token") or "").strip() or None
                 debug_logger.log_info(f"[reCAPTCHA] 取码完成: success={bool(token)}")
                 fingerprint = (
                     solve_bundle.get("fingerprint")

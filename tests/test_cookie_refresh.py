@@ -3,6 +3,7 @@ import json
 import tempfile
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from curl_cffi import CurlInfo
@@ -300,9 +301,16 @@ class TokenCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
             "google_cookies": NEW_COOKIES,
             "email": EMAIL,
         }
+        self.recover_patch = patch(
+            "src.services.browser_login.browser_login_service.recover_saved_login",
+            new_callable=AsyncMock,
+        )
+        self.recover_mock = self.recover_patch.start()
+        self.recover_mock.return_value = None
 
     async def asyncTearDown(self):
         self.login.stop()
+        self.recover_patch.stop()
         self.temp.cleanup()
 
     async def test_manual_refresh_saves_cookies_and_validates_new_snapshot(self):
@@ -374,6 +382,100 @@ class TokenCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (await self.db.get_token(self.token_id)).google_cookies, NEW_COOKIES
         )
+
+    async def test_current_session_does_not_immediately_need_revalidation(self):
+        token = await self.db.get_token(self.token_id)
+        token.at = "flow-frontend-cookie"
+        token.at_expires = datetime.now(timezone.utc) + timedelta(minutes=55)
+        self.assertFalse(self.manager.needs_at_refresh(token))
+        token.at_expires = datetime.now(timezone.utc) + timedelta(minutes=4)
+        self.assertTrue(self.manager.needs_at_refresh(token))
+        token.at = "legacy-at"
+        token.at_expires = datetime.now(timezone.utc) + timedelta(minutes=55)
+        self.assertTrue(self.manager.needs_at_refresh(token))
+
+    async def test_scheduler_renews_before_deadline_even_with_long_interval(self):
+        now = datetime.now(timezone.utc)
+        await self.db.update_token(
+            self.token_id, at="flow-frontend-cookie",
+            at_expires=now + timedelta(minutes=4),
+            last_st_refresh_at=now - timedelta(minutes=50),
+            refresh_interval_minutes=120,
+        )
+        await self.manager.run_protocol_refresh_once()
+        latest = await self.db.get_token(self.token_id)
+        self.assertEqual(latest.google_cookies, NEW_COOKIES)
+        self.assertGreater(latest.at_expires, now + timedelta(minutes=5))
+
+    async def test_scheduler_retries_due_session_after_failed_attempt(self):
+        now = datetime.now(timezone.utc)
+        await self.db.update_token(
+            self.token_id, at="flow-frontend-cookie",
+            at_expires=now - timedelta(minutes=1),
+            last_st_refresh_at=now - timedelta(minutes=2),
+            last_st_refresh_result="TimeoutError", refresh_interval_minutes=120,
+        )
+        await self.manager.run_protocol_refresh_once()
+        self.assertEqual((await self.db.get_token(self.token_id)).last_st_refresh_result, "success")
+
+    async def test_scheduler_throttles_recent_failed_attempt(self):
+        now = datetime.now(timezone.utc)
+        await self.db.update_token(
+            self.token_id, at_expires=now - timedelta(minutes=1),
+            last_st_refresh_at=now, last_st_refresh_result="TimeoutError",
+        )
+        await self.manager.run_protocol_refresh_once()
+        self.login_mock.assert_not_awaited()
+
+    async def test_scheduler_respects_interval_for_session_with_time_remaining(self):
+        now = datetime.now(timezone.utc)
+        await self.db.update_token(
+            self.token_id, at="flow-frontend-cookie",
+            at_expires=now + timedelta(minutes=30),
+            last_st_refresh_at=now - timedelta(minutes=25), refresh_interval_minutes=120,
+        )
+        await self.manager.run_protocol_refresh_once()
+        self.login_mock.assert_not_awaited()
+
+    async def test_scheduler_respects_disabled_account_refresh(self):
+        await self.db.update_token(self.token_id, auto_refresh_enabled=False)
+        await self.manager.run_protocol_refresh_once()
+        self.login_mock.assert_not_awaited()
+
+    async def test_request_renews_overdue_session_using_authenticated_rpc(self):
+        await self.db.update_token(
+            self.token_id, at="flow-frontend-cookie",
+            at_expires=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+        token = await self.manager.ensure_valid_token(await self.db.get_token(self.token_id))
+        self.assertIsNotNone(token)
+        self.assertGreater(token.at_expires, datetime.now(timezone.utc))
+        self.assertTrue(token.is_active)
+        self.flow.st_to_at.assert_awaited_once()
+        self.flow.get_credits.assert_not_called()
+        self.login_mock.assert_not_awaited()
+
+    async def test_at_validation_does_not_overwrite_concurrent_cookie_push(self):
+        async def push_during_validation(*args, **kwargs):
+            await self.db.update_token(
+                self.token_id, google_cookies=NEW_COOKIES, at="newer-at",
+            )
+            return {"access_token": "flow-frontend-cookie", "credits": 42}
+
+        self.flow.st_to_at.side_effect = push_during_validation
+        token = await self.db.get_token(self.token_id)
+        self.assertFalse(await self.manager._do_refresh_at(self.token_id, token.st, token))
+        self.assertEqual((await self.db.get_token(self.token_id)).at, "newer-at")
+
+    async def test_unknown_rpc_failure_does_not_disable_valid_browser_account(self):
+        self.flow._is_proxy_connection_error.return_value = False
+        self.flow._is_retryable_network_error.return_value = False
+        self.flow.st_to_at.side_effect = RuntimeError("rpc=nzlxg, code=13")
+        self.login_mock.return_value = {"success": False, "error": "unexpected response"}
+        with patch("src.services.token_manager.config") as config:
+            config.captcha_method = "extension"
+            self.assertFalse(await self.manager._refresh_at_inner(self.token_id))
+        self.assertTrue((await self.db.get_token(self.token_id)).is_active)
 
     async def test_browser_fallback_passes_account_id_and_requires_validated_cookies(
         self,
@@ -463,6 +565,33 @@ class TokenCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await self.manager._refresh_at_inner(self.token_id))
         self.assertFalse((await self.db.get_token(self.token_id)).is_active)
 
+    async def test_saved_google_profile_recovers_cookie_after_worker_failure(self):
+        self.login_mock.return_value = {"success": False, "error": "rpc=401"}
+        self.recover_mock.return_value = {"email": EMAIL, "google_cookies": NEW_COOKIES}
+        pool = make_failing_personal_pool(RuntimeError("worker has no Google session"))
+        with (
+            patch("src.services.token_manager.config") as config,
+            patch.object(PersonalService, "get_instance", AsyncMock(return_value=pool)),
+        ):
+            config.captcha_method = "personal"
+            self.assertTrue(await self.manager.refresh_cookies(self.token_id))
+        self.assertEqual((await self.db.get_token(self.token_id)).google_cookies, NEW_COOKIES)
+        self.recover_mock.assert_awaited_once()
+
+    async def test_google_challenge_is_recorded_for_manual_login_prompt(self):
+        from src.services.flow_login_recovery import GoogleLoginRequired
+        self.login_mock.return_value = {"success": False, "error": "rpc=401"}
+        pool = make_failing_personal_pool(GoogleLoginRequired("Google 需要二次验证"))
+        with (
+            patch("src.services.token_manager.config") as config,
+            patch.object(PersonalService, "get_instance", AsyncMock(return_value=pool)),
+        ):
+            config.captcha_method = "personal"
+            self.assertFalse(await self.manager.refresh_cookies(self.token_id))
+        latest = await self.db.get_token(self.token_id)
+        self.assertTrue(latest.last_st_refresh_result.startswith("GoogleLoginRequired:"))
+        self.assertEqual(latest.google_cookies, COOKIES)
+
 
 class BrowserCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_personal_host_cookie_preserves_original_origin(self):
@@ -537,9 +666,11 @@ class BrowserCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
         browser._semaphore = asyncio.Semaphore(1)
         browser._solve_inflight = 0
         browser.note_idle = MagicMock()
+        browser.db = MagicMock()
+        browser.db.get_token = AsyncMock(return_value=Token(st="old", email=EMAIL))
         page = MagicMock(url="https://flow.google.com/projects")
         page.goto = AsyncMock(return_value=types.SimpleNamespace(status=200))
-        page.evaluate = AsyncMock(return_value=EMAIL)
+        page.evaluate = AsyncMock(return_value={"host": "flow.google.com", "ready": "complete", "email": EMAIL})
         page.close = AsyncMock()
         cookies = json.loads(COOKIES)
         cookies.append(
@@ -570,6 +701,8 @@ class BrowserCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
         browser._semaphore = asyncio.Semaphore(1)
         browser._solve_inflight = 0
         browser.note_idle = MagicMock()
+        browser.db = MagicMock()
+        browser.db.get_token = AsyncMock(return_value=Token(st="old", email=EMAIL))
         page = MagicMock(url="https://flow.google.com/projects")
         page.goto = AsyncMock(side_effect=RuntimeError("timeout"))
         page.close = AsyncMock()
@@ -597,6 +730,8 @@ class BrowserCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         service._mark_runtime_active = MagicMock()
         service.initialize = AsyncMock()
+        service.db = MagicMock()
+        service.db.get_token = AsyncMock(return_value=Token(st="old", email=EMAIL))
         service._ensure_resident_tab = AsyncMock(return_value=("slot", resident))
         service._consume_resident_slot_reservation = AsyncMock()
         service._release_resident_slot_reservation = AsyncMock()
