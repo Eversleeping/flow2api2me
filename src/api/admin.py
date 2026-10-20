@@ -24,7 +24,7 @@ from ..core.config import (
     get_yescaptcha_min_score,
     normalize_yescaptcha_task_type,
 )
-from ..core.models import Token
+from ..core.models import RequestLog, Token
 from ..core.browser_runtime_status import (
     fail_runtime_prepare,
     finish_runtime_prepare,
@@ -1212,12 +1212,18 @@ async def refresh_at(token_id: int, token: str = Depends(verify_admin_token)):
     """刷新完整 Google/Flow Cookie 并验证当前登录态。"""
     from ..core.logger import debug_logger
     from ..core.config import config
+
+    started_at = time.monotonic()
+    snapshot = None
+    status_code = 500
+    log_response = {"success": False, "error": "凭证刷新中断，未取得结果"}
     
     debug_logger.log_info(
         f"[API] 手动刷新 AT 请求: token_id={token_id}, captcha_method={config.captcha_method}"
     )
     
     try:
+        snapshot = await token_manager.get_token(token_id)
         # 手动刷新完整 Cookie，不依赖 AT 标识是否到期。
         success = await token_manager.refresh_cookies(token_id)
 
@@ -1229,7 +1235,7 @@ async def refresh_at(token_id: int, token: str = Depends(verify_admin_token)):
             
             debug_logger.log_info(f"[API] AT 刷新成功: token_id={token_id}")
             
-            return {
+            log_response = {
                 "success": True,
                 "message": message,
                 "token": {
@@ -1240,6 +1246,8 @@ async def refresh_at(token_id: int, token: str = Depends(verify_admin_token)):
                     else None,
                 },
             }
+            status_code = 200
+            return log_response
         else:
             debug_logger.log_error(f"[API] AT 刷新失败: token_id={token_id}")
             
@@ -1249,11 +1257,35 @@ async def refresh_at(token_id: int, token: str = Depends(verify_admin_token)):
             ) or "Cookie 刷新失败，请重新同步完整的 Google Cookies"
             
             raise HTTPException(status_code=500, detail=error_detail)
-    except HTTPException:
+    except HTTPException as exc:
+        status_code = exc.status_code
+        log_response = {"success": False, "error": exc.detail}
         raise
     except Exception as e:
         debug_logger.log_error(f"[API] 刷新AT异常: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"刷新AT失败: {str(e)}")
+        detail = f"刷新AT失败: {str(e)}"
+        log_response = {"success": False, "error": detail}
+        raise HTTPException(status_code=500, detail=detail)
+    finally:
+        # Persist only the public result, never the Token object or its Cookies.
+        # A log-storage failure must not change a completed refresh's outcome.
+        try:
+            await db.add_request_log(RequestLog(
+                token_id=snapshot.id if snapshot else None,
+                operation="refresh_credentials",
+                request_body=json.dumps({
+                    "token_id": token_id, "source": "manual",
+                }, ensure_ascii=False),
+                response_body=json.dumps(log_response, ensure_ascii=False),
+                status_code=status_code,
+                duration=time.monotonic() - started_at,
+                status_text="completed" if status_code == 200 else "failed",
+                progress=100 if status_code == 200 else 0,
+            ))
+        except Exception as log_error:
+            debug_logger.log_error(
+                f"[API] 保存凭证刷新日志失败: token_id={token_id}, error={log_error}"
+            )
 
 
 @router.post("/api/tokens/st2at")
