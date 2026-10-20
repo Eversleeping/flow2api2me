@@ -25,7 +25,7 @@ class GenerationCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.handler.load_balancer = types.SimpleNamespace(
             select_token=AsyncMock(return_value=self.token), release_pending=AsyncMock())
         self.handler.token_manager = types.SimpleNamespace(
-            ensure_valid_token=AsyncMock(return_value=self.token),
+            prepare_generation_token=AsyncMock(return_value=self.token),
             ensure_project_exists=AsyncMock(return_value='project'),
             record_usage=AsyncMock(), record_success=AsyncMock(), record_error=AsyncMock())
         self.pipeline_drained = False
@@ -86,6 +86,17 @@ class GenerationCompletionTests(unittest.IsolatedAsyncioTestCase):
         generator = await self._receive_final(model='veo-3.1-fast')
         await self._assert_finalized()
         await generator.aclose()
+
+    async def test_failed_wake_refresh_does_not_create_project_or_generate(self):
+        self.handler.token_manager.prepare_generation_token.side_effect = RuntimeError("credential refresh failed")
+        chunks = [chunk async for chunk in self.handler.handle_generation(
+            model="gemini-3.0-pro-image-landscape", prompt="test", stream=False,
+        )]
+        self.assertTrue(any("credential refresh failed" in chunk for chunk in chunks))
+        self.assertFalse(self.pipeline_drained)
+        self.handler.token_manager.ensure_project_exists.assert_not_awaited()
+        self.handler.token_manager.record_usage.assert_not_awaited()
+        self.handler.load_balancer.release_pending.assert_awaited_once()
 
     async def test_disconnect_after_result_cannot_replace_success_with_499(self):
         generator = await self._receive_final()

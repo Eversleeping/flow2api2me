@@ -663,6 +663,22 @@ class TokenManager:
             return True
         return self._should_refresh_at(token)
 
+    async def prepare_generation_token(self, token: Optional[Token]) -> Optional[Token]:
+        """Wake the browser and refresh credentials before any generation work."""
+        if token is None:
+            return None
+        if config.captcha_method == "personal":
+            from .browser_captcha_personal import BrowserCaptchaService
+
+            service = await BrowserCaptchaService.get_instance(self.db)
+            await service.prepare_generation(token.id, token.current_project_id)
+            # Selection happened before wake-up. Always replace that snapshot
+            # so project creation, uploads and generation use the saved cookies.
+            token = await self.db.get_token(token.id)
+            if token is None or not token.is_active:
+                return None
+        return await self.ensure_valid_token(token)
+
     async def ensure_valid_token(self, token: Optional[Token]) -> Optional[Token]:
         """确保 token 的 AT 可用，并在必要时返回刷新后的最新对象。"""
         if not token:

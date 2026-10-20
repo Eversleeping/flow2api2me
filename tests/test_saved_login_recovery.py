@@ -100,3 +100,55 @@ class SavedLoginRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 await self.service.recover_saved_login(self.token, manager=manager)
         get_captcha.assert_not_awaited()
         self.assertIs(self.service._dispose.call_args.args[0].browser, self.browser)
+
+    async def test_wake_refresh_succeeds_before_handoff_to_same_worker(self):
+        worker = types.SimpleNamespace(adopt_login_browser=AsyncMock())
+        manager = MagicMock()
+        saved = types.SimpleNamespace(google_cookies="")
+
+        async def refresh(token_id, token, result):
+            worker.adopt_login_browser.assert_not_awaited()
+            saved.google_cookies = result["google_cookies"]
+            return "refreshed-st"
+
+        manager._save_refreshed_cookies = AsyncMock(side_effect=refresh)
+        manager.db.get_token = AsyncMock(return_value=saved)
+        with patch("src.services.browser_captcha_personal.BrowserCaptchaService.get_instance", new_callable=AsyncMock) as pool:
+            result = await self.service.recover_saved_login(
+                self.token, manager=manager, captcha_service=worker,
+            )
+        self.assertEqual(result["_saved_st"], "refreshed-st")
+        pool.assert_not_awaited()
+        worker.adopt_login_browser.assert_awaited_once_with(
+            self.browser, self.tab, "saved-profile", saved,
+        )
+
+    async def test_wake_refresh_failure_keeps_worker_unavailable(self):
+        worker = types.SimpleNamespace(adopt_login_browser=AsyncMock())
+        manager = MagicMock()
+        manager._save_refreshed_cookies = AsyncMock(side_effect=RuntimeError("refresh failed"))
+        with self.assertRaisesRegex(RuntimeError, "refresh failed"):
+            await self.service.recover_saved_login(self.token, manager=manager, captcha_service=worker)
+        worker.adopt_login_browser.assert_not_awaited()
+        self.service._dispose.assert_awaited_once()
+
+    async def test_idle_resume_hands_validated_browser_to_requesting_worker(self):
+        worker = types.SimpleNamespace(adopt_login_browser=AsyncMock())
+        result = await self.service.recover_saved_login(self.token, captcha_service=worker)
+        self.assertEqual(result["email"], EMAIL)
+        worker.adopt_login_browser.assert_awaited_once_with(
+            self.browser, self.tab, "saved-profile", self.token,
+        )
+        disposed = self.service._dispose.call_args.args[0]
+        self.assertIsNone(disposed.browser)
+        self.assertIsNone(disposed.profile)
+
+    async def test_idle_resume_rejects_wrong_account_and_disposes_browser(self):
+        self.tab.evaluate.return_value = json.dumps({
+            "host": "flow.google.com", "ready": "complete", "email": "other@example.com",
+        })
+        worker = types.SimpleNamespace(adopt_login_browser=AsyncMock())
+        with self.assertRaisesRegex(RuntimeError, "账号与当前 Token 不一致"):
+            await self.service.recover_saved_login(self.token, captcha_service=worker)
+        worker.adopt_login_browser.assert_not_awaited()
+        self.service._dispose.assert_awaited_once()

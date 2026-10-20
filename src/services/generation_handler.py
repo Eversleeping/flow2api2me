@@ -1739,7 +1739,7 @@ class GenerationHandler:
                 progress=15,
             )
             ensure_at_started_at = time.time()
-            token = await self.token_manager.ensure_valid_token(token)
+            token = await self.token_manager.prepare_generation_token(token)
             perf_trace["ensure_at_ms"] = int(
                 (time.time() - ensure_at_started_at) * 1000
             )

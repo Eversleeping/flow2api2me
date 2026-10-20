@@ -325,7 +325,7 @@ class BrowserLoginService:
         session = self._owned(session_id, owner)
         await self._dispose(session)
 
-    async def recover_saved_login(self, token, manager=None):
+    async def recover_saved_login(self, token, manager=None, *, captcha_service=None):
         """Reuse only an idle profile belonging to this account, without an admin dialog."""
         email = (token.login_account or token.email or "").strip().lower()
         async with self._lock:
@@ -374,12 +374,15 @@ class BrowserLoginService:
                     saved_token = await manager.db.get_token(token.id)
                     if not saved_token or saved_token.google_cookies != result["google_cookies"]:
                         raise RuntimeError("登录态在恢复期间已更新，请稍后重试")
-                    service = await BrowserCaptchaService.get_instance(manager.db)
-                    await service.adopt_login_browser(session.browser, tab, session.profile, saved_token)
+                    if captcha_service is None:
+                        captcha_service = await BrowserCaptchaService.get_instance(manager.db)
+                    token = saved_token
+                    result["_saved_st"] = new_st
+                if captcha_service is not None:
+                    await captcha_service.adopt_login_browser(session.browser, tab, session.profile, token)
                     session.browser = None
                     session.tab = None
                     session.profile = None
-                    result["_saved_st"] = new_st
                 return result
             finally:
                 await self._dispose(session)

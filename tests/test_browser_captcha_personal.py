@@ -1,7 +1,10 @@
+import asyncio
 import itertools
 import json
 import os
+from pathlib import Path
 import tempfile
+import time
 import types
 import unittest
 import uuid
@@ -85,6 +88,158 @@ def _fake_cdp_command():
 class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.service = BrowserCaptchaService()
+
+    async def _adopt_retained_browser(self):
+        service = self.service
+        service.headless = False
+        service._extract_tab_fingerprint = AsyncMock(return_value={})
+        service._build_proxy_config_signature = AsyncMock(return_value="proxy")
+        service._stop_browser_process = AsyncMock()
+        service._close_tab_quietly = AsyncMock()
+        service._disconnect_connection_quietly = AsyncMock()
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        root_patch = patch("src.services.browser_login_profiles.PROFILE_ROOT", Path(parent.name))
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
+        profile = tempfile.mkdtemp(prefix="session-", dir=parent.name)
+        token = types.SimpleNamespace(
+            id=7, email="account@example.com", current_project_id="project-7",
+            google_cookies="OSID=original", is_active=True,
+        )
+        await service.adopt_login_browser(
+            types.SimpleNamespace(stopped=False, targets=[], _process=None), object(), profile, token,
+        )
+        service._runtime_last_active_at = time.time() - 120
+        for info in service._resident_tabs.values():
+            info.last_used_at = time.time() - 120
+        return token, profile
+
+    async def test_idle_login_browser_closes_and_resumes_same_account(self):
+        service = self.service
+        token, profile = await self._adopt_retained_browser()
+        self.assertTrue(await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60))
+        self.assertIsNone(service.browser)
+        self.assertFalse(service._resident_tabs)
+        self.assertTrue(Path(profile, ".flow2api-account.json").is_file())
+
+        async def restore(saved_token, *, manager, captcha_service):
+            self.assertIs(saved_token, token)
+            self.assertIs(captcha_service, service)
+            await service.adopt_login_browser(
+                types.SimpleNamespace(stopped=False, targets=[], _process=None), object(), profile, saved_token,
+            )
+            return {"email": saved_token.email, "_saved_st": "refreshed"}
+
+        with patch("src.services.browser_login.browser_login_service.recover_saved_login", AsyncMock(side_effect=restore)) as recovery:
+            await asyncio.gather(service.initialize(), service.initialize())
+        recovery.assert_awaited_once()
+        self.assertEqual(service._interactive_login_profile, profile)
+        self.assertEqual(next(iter(service._resident_tabs.values())).token_id, token.id)
+        await service.close()
+        self.assertTrue(Path(profile).is_dir())
+
+    async def test_concurrent_generations_wait_for_single_wake_refresh(self):
+        service = self.service
+        token, profile = await self._adopt_retained_browser()
+        await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60)
+        started, refreshed = asyncio.Event(), asyncio.Event()
+
+        async def restore(saved_token, *, manager, captcha_service):
+            self.assertIsNotNone(manager)
+            started.set()
+            await refreshed.wait()
+            await service.adopt_login_browser(
+                types.SimpleNamespace(stopped=False, targets=[], _process=None), object(), profile, saved_token,
+            )
+            return {"_saved_st": "new-credential"}
+
+        with patch("src.services.browser_login.browser_login_service.recover_saved_login", AsyncMock(side_effect=restore)) as recovery:
+            first = asyncio.create_task(service.prepare_generation(token.id))
+            await asyncio.wait_for(started.wait(), 1)
+            second = asyncio.create_task(service.prepare_generation(token.id))
+            await asyncio.sleep(0)
+            self.assertFalse(first.done())
+            self.assertFalse(second.done())
+            self.assertIsNone(service.browser)
+            refreshed.set()
+            await asyncio.gather(first, second)
+        recovery.assert_awaited_once()
+        await service.close()
+
+    async def test_idle_login_browser_keeps_busy_and_reserved_tabs(self):
+        service = self.service
+        await self._adopt_retained_browser()
+        info = next(iter(service._resident_tabs.values()))
+        async with info.solve_lock:
+            self.assertFalse(await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60))
+        info.pending_assignment_count = 1
+        self.assertFalse(await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60))
+        service._stop_browser_process.assert_not_awaited()
+
+    async def test_idle_login_browser_rechecks_activity_after_waiting_for_lock(self):
+        service = self.service
+        await self._adopt_retained_browser()
+        original_check = service._has_active_browser_work
+
+        async def request_arrived():
+            active = await original_check()
+            service._mark_runtime_active()
+            return active
+
+        service._has_active_browser_work = request_arrived
+        self.assertFalse(await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60))
+        self.assertIsNotNone(service.browser)
+
+    async def test_idle_shutdown_does_not_interrupt_initialization(self):
+        service = self.service
+        await self._adopt_retained_browser()
+        async with service._login_resume_lock:
+            self.assertFalse(await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60))
+        self.assertIsNotNone(service.browser)
+
+    async def test_login_resume_rechecks_account_is_still_enabled(self):
+        service = self.service
+        token, _ = await self._adopt_retained_browser()
+        await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60)
+        token.is_active = False
+        service.db = types.SimpleNamespace(get_token=AsyncMock(return_value=token))
+        with patch("src.services.browser_login.browser_login_service.recover_saved_login", AsyncMock()) as recovery:
+            with self.assertRaisesRegex(RuntimeError, "账号不可用"):
+                await service.initialize()
+        recovery.assert_not_awaited()
+
+    async def test_failed_login_resume_does_not_fall_back_to_empty_profile(self):
+        service = self.service
+        token, _ = await self._adopt_retained_browser()
+        await service.shutdown_idle_runtime_if_needed(idle_ttl_seconds=60)
+        with patch("src.services.browser_login.browser_login_service.recover_saved_login", AsyncMock(return_value=None)) as recovery:
+            with self.assertRaisesRegex(RuntimeError, "凭证刷新失败"):
+                await service.initialize()
+        recovery.assert_awaited_once()
+        self.assertIsNone(service.browser)
+        self.assertIs(service._retained_login_token, token)
+
+    async def test_idle_login_reaper_shuts_down_authenticated_browser(self):
+        service = self.service
+        await self._adopt_retained_browser()
+        service._idle_tab_ttl_seconds = 60
+        with patch("src.services.browser_captcha_personal.asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError()])):
+            await service._idle_tab_reaper_loop()
+        self.assertIsNone(service.browser)
+
+    async def test_retained_browser_flushes_profile_before_termination(self):
+        service = self.service
+        await self._adopt_retained_browser()
+        service._disconnect_browser_connection_quietly = AsyncMock()
+        service._terminate_browser_processes_for_profile_dirs = MagicMock()
+        browser = types.SimpleNamespace(
+            _process=None, connection=None, send=AsyncMock(), stop=MagicMock(),
+        )
+        await BrowserCaptchaService._stop_browser_process(service, browser)
+        browser.send.assert_awaited_once()
+        self.assertEqual(next(browser.send.call_args.args[0])["method"], "Browser.close")
+        browser.stop.assert_called_once()
 
     async def test_handoff_reuses_browser_and_does_not_reinject_login_cookies(self):
         service = self.service

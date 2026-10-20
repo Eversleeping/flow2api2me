@@ -1647,6 +1647,8 @@ class BrowserCaptchaService:
         )
         self._runtime_ephemeral_user_data_dir: Optional[str] = None
         self._interactive_login_profile: Optional[str] = None
+        self._retained_login_token = None
+        self._login_resume_lock = asyncio.Lock()
         self._managed_runtime_profile_dirs: set[str] = set()
         self._browser_process_pid: Optional[int] = None
         self.user_data_dir = self._resolve_user_data_dir(self.headless)
@@ -2361,6 +2363,7 @@ class BrowserCaptchaService:
             or self._custom_lock.locked()
             or self._tab_build_lock.locked()
             or self._browser_lock.locked()
+            or self._login_resume_lock.locked()
         ):
             return True
 
@@ -2750,7 +2753,11 @@ class BrowserCaptchaService:
         idle_ttl_seconds: Optional[int] = None,
         reason: str = "idle_runtime_ttl",
     ) -> bool:
-        if self._fresh_profile_restart_pending or self._interactive_login_profile:
+        if self._fresh_profile_restart_pending:
+            return False
+        if self._interactive_login_profile and not is_retained_login_profile(
+            self._interactive_login_profile
+        ):
             return False
 
         try:
@@ -2775,15 +2782,27 @@ class BrowserCaptchaService:
         if await self._has_active_browser_work():
             return False
 
-        async with self._resident_lock:
-            if self._resident_tabs:
+        # Recheck after acquiring the same locks as tab creation/login handoff.
+        # A request arriving during the first idle check must keep its browser.
+        async with self._login_resume_lock, self._tab_build_lock, self._browser_lock:
+            if (
+                self.browser is not browser_instance
+                or self._get_runtime_idle_seconds() < ttl_seconds
+            ):
                 return False
-
-        async with self._custom_lock:
+            if self._legacy_lock.locked() or self._custom_lock.locked():
+                return False
+            async with self._resident_lock:
+                for slot_id, info in self._resident_tabs.items():
+                    if (
+                        not self._interactive_login_profile
+                        or self._is_resident_slot_busy_for_allocation_locked(slot_id, info)
+                        or time.time() - info.last_used_at < ttl_seconds
+                    ):
+                        return False
             if self._custom_tabs:
                 return False
-
-        await self._shutdown_browser_runtime(cancel_idle_reaper=False, reason=reason)
+            await self._shutdown_browser_runtime_locked(reason=reason)
         return True
 
     async def _collect_reclaimable_resident_slot_ids(self) -> list[str]:
@@ -6803,13 +6822,16 @@ class BrowserCaptchaService:
         while True:
             try:
                 await asyncio.sleep(30)  # 每30秒检查一次
+                if self._interactive_login_profile:
+                    # Close the whole authenticated browser, keeping its profile
+                    # and account binding for initialize() to restore on demand.
+                    await self.shutdown_idle_runtime_if_needed()
+                    continue
                 current_time = time.time()
                 tabs_to_close = []
 
                 async with self._resident_lock:
                     for slot_id, resident_info in list(self._resident_tabs.items()):
-                        if self._interactive_login_profile:
-                            continue
                         if resident_info.solve_lock.locked():
                             continue
                         idle_seconds = current_time - resident_info.last_used_at
@@ -9037,6 +9059,26 @@ class BrowserCaptchaService:
         )
         profile_dirs = self._collect_runtime_profile_process_targets()
         connection = getattr(browser_instance, "connection", None)
+        if self._interactive_login_profile and is_retained_login_profile(
+            self._interactive_login_profile
+        ):
+            # Let Chromium flush its Cookies/local storage before the existing
+            # termination fallback. Killing it first can lose the saved login.
+            try:
+                from nodriver import cdp
+
+                await self._run_with_timeout(
+                    browser_instance.send(cdp.browser.close()),
+                    timeout_seconds=5.0,
+                    label="browser.graceful_close",
+                )
+            except Exception:
+                pass
+            if isinstance(process, asyncio.subprocess.Process):
+                try:
+                    await asyncio.wait_for(process.wait(), 5)
+                except asyncio.TimeoutError:
+                    pass
         await self._disconnect_browser_connection_quietly(
             browser_instance, reason=reason
         )
@@ -9204,6 +9246,7 @@ class BrowserCaptchaService:
         interactive_profile = self._interactive_login_profile
         self._interactive_login_profile = None
         if interactive_profile and not is_retained_login_profile(interactive_profile):
+            self._retained_login_token = None
             await asyncio.to_thread(shutil.rmtree, interactive_profile, True)
         await self._cleanup_runtime_profile_dirs_after_shutdown(reason=reason)
 
@@ -10010,6 +10053,45 @@ class BrowserCaptchaService:
     async def initialize(self):
         """初始化 nodriver 浏览器"""
         self._check_available()
+        # Serialize initialization with idle shutdown as well as other resumes.
+        # Otherwise shutdown can happen after the resume check, making this
+        # request fall through to launching an unauthenticated fresh profile.
+        async with self._login_resume_lock:
+            await self._initialize_browser_runtime()
+
+    async def prepare_generation(self, token_id: int, project_id: Optional[str] = None):
+        """Finish waking and refreshing the account before generation reads credentials."""
+        async with self._login_resume_lock:
+            token = self._retained_login_token
+            if token is None or token.id != token_id:
+                return
+            await self._initialize_browser_runtime()
+
+    async def _initialize_browser_runtime(self):
+        if self._retained_login_token is not None and not self._initialized:
+            from .browser_login import browser_login_service
+            from .flow_client import FlowClient
+            from .proxy_manager import ProxyManager
+            from .token_manager import TokenManager
+
+            token = self._retained_login_token
+            if self.db is not None:
+                token = await self.db.get_token(token.id)
+            if token is None or not getattr(token, "is_active", True):
+                raise RuntimeError("保存的浏览器账号不可用，请重新登录")
+            # Export the restored browser's current cookies and validate them
+            # against Flow before adoption makes this worker usable. Conditional
+            # persistence protects credentials saved concurrently elsewhere.
+            manager = TokenManager(self.db, FlowClient(ProxyManager(self.db), self.db))
+            restored = await asyncio.wait_for(
+                browser_login_service.recover_saved_login(
+                    token, manager=manager, captcha_service=self,
+                ),
+                timeout=120.0,
+            )
+            if not restored or not restored.get("_saved_st"):
+                raise RuntimeError("登录浏览器恢复或凭证刷新失败，已停止生成，请稍后重试")
+            debug_logger.log_info("[BrowserCaptcha] 登录浏览器已唤醒且凭证刷新成功，可以继续生成")
 
         if (
             self._initialized
@@ -14002,6 +14084,7 @@ class BrowserCaptchaService:
             await self._shutdown_browser_runtime_locked(reason="interactive_login_handoff")
             self.browser = browser
             self._interactive_login_profile = str(profile)
+            self._retained_login_token = token
             self.user_data_dir = str(profile)
             self._initialized = True
             self._proxy_config_signature = signature
@@ -15536,6 +15619,16 @@ class _PersonalBrowserPoolService:
                 debug_logger.log_warning(
                     f"[BrowserCaptchaPool] 空闲浏览器实例回收循环异常: {e}"
                 )
+
+    async def prepare_generation(self, token_id: int, project_id: Optional[str] = None):
+        worker_index = None
+        try:
+            worker_index, worker = await self._acquire_worker(
+                token_id=token_id, project_id=project_id,
+            )
+            await worker.prepare_generation(token_id, project_id)
+        finally:
+            await self._release_worker_reservation(worker_index)
 
     async def _acquire_worker(
         self,
