@@ -291,56 +291,68 @@ class CurrentFlowClientMixin:
         mime_type = self._detect_image_mime_type(image_bytes)
         extension = "png" if "png" in mime_type else "jpg"
         filename = f"flow2api_{uuid.uuid4().hex[:12]}.{extension}"
-        recaptcha_token, browser_id = await self._get_recaptcha_token(
-            normalized_project_id,
-            action="UPLOAD_IMAGE",
-            token_id=token_id,
-            website_url=self._build_flow_frontend_project_page_url(
-                normalized_project_id
-            ),
-        )
-        if not recaptcha_token:
-            raise RuntimeError("Failed to obtain reCAPTCHA token for image upload")
-        try:
-            context = self._frontend_project_context(
-                normalized_project_id,
-                recaptcha_token,
-            )
-            payload = await self._current_rpc(
-                rpc_id="maseQ",
-                argument=[
-                    context,
-                    base64.b64encode(image_bytes).decode("ascii"),
-                    mime_type,
-                    1,
-                    None,
-                    None,
-                    None,
-                    None,
-                    filename,
-                    None,
-                    str(uuid.uuid4()).upper(),
-                    str(uuid.uuid4()).upper(),
-                ],
-                google_cookies=google_cookies,
-                token_id=token_id,
-                project_id=normalized_project_id,
-                timeout=max(self._get_control_plane_timeout(), 90),
-            )
-            media_url = self._find_flow_content_url(payload, "image")
-            media_id = ""
-            if media_url:
-                match = re.search(r"/image/([0-9a-f-]{36})", media_url, re.I)
-                media_id = match.group(1) if match else ""
-            media_id = media_id or self._find_uuid_value(
-                payload,
-                excluded={normalized_project_id},
-            )
-            if not media_id:
-                raise RuntimeError("Flow frontend upload response missing mediaId")
-            return media_id
-        finally:
-            await self._notify_browser_captcha_request_finished(browser_id)
+        # Upload retries never resubmit the paid image generation RPC. Acquire a
+        # fresh action token on every attempt; recover before clearing its context.
+        max_retries = max(1, int(self._get_runtime_config().flow_max_retries or 1))
+        for retry_attempt in range(max_retries):
+            browser_id = None
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    normalized_project_id,
+                    action="UPLOAD_IMAGE",
+                    token_id=token_id,
+                    website_url=self._build_flow_frontend_project_page_url(
+                        normalized_project_id
+                    ),
+                )
+                if not recaptcha_token:
+                    raise RuntimeError("Failed to obtain reCAPTCHA token for image upload")
+                context = self._frontend_project_context(
+                    normalized_project_id,
+                    recaptcha_token,
+                )
+                payload = await self._current_rpc(
+                    rpc_id="maseQ",
+                    argument=[
+                        context,
+                        base64.b64encode(image_bytes).decode("ascii"),
+                        mime_type,
+                        1,
+                        None,
+                        None,
+                        None,
+                        None,
+                        filename,
+                        None,
+                        str(uuid.uuid4()).upper(),
+                        str(uuid.uuid4()).upper(),
+                    ],
+                    google_cookies=google_cookies,
+                    token_id=token_id,
+                    project_id=normalized_project_id,
+                    timeout=max(self._get_control_plane_timeout(), 90),
+                )
+                media_url = self._find_flow_content_url(payload, "image")
+                media_id = ""
+                if media_url:
+                    match = re.search(r"/image/([0-9a-f-]{36})", media_url, re.I)
+                    media_id = match.group(1) if match else ""
+                media_id = media_id or self._find_uuid_value(
+                    payload,
+                    excluded={normalized_project_id},
+                )
+                if not media_id:
+                    raise RuntimeError("Flow frontend upload response missing mediaId")
+                return media_id
+            except Exception as error:
+                should_retry = await self._handle_retryable_generation_error(
+                    error, retry_attempt, max_retries, browser_id,
+                    normalized_project_id, "Reference image upload",
+                )
+                if not should_retry or retry_attempt >= max_retries - 1:
+                    raise RuntimeError(f"参考图上传失败：{error}") from error
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
 
     async def generate_image(
         self,

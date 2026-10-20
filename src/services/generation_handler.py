@@ -2114,14 +2114,23 @@ class GenerationHandler:
 
                 # 支持多图输入
                 for idx, image_bytes in enumerate(images):
-                    media_id = await self.flow_client.upload_image(
-                        token.at,
-                        image_bytes,
-                        model_config["aspect_ratio"],
-                        project_id=project_id,
-                        token_id=token.id,
-                        google_cookies=getattr(token, "google_cookies", None),
-                    )
+                    try:
+                        media_id = await self.flow_client.upload_image(
+                            token.at,
+                            image_bytes,
+                            model_config["aspect_ratio"],
+                            project_id=project_id,
+                            token_id=token.id,
+                            google_cookies=getattr(token, "google_cookies", None),
+                        )
+                    except Exception:
+                        if image_trace is not None:
+                            image_trace["upload_images_ms"] = int(
+                                (time.time() - upload_started_at) * 1000
+                            )
+                            image_trace["upload_failed_image_index"] = idx + 1
+                            image_trace["uploaded_image_count"] = len(image_inputs)
+                        raise
                     image_inputs.append(
                         {
                         "name": media_id,

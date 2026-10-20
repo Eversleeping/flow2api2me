@@ -109,6 +109,25 @@ class ImageUpscaleFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('放大失败', content)
         self.handler.flow_client.upsample_image.assert_not_awaited()
 
+    async def test_failed_reference_upload_records_stage_without_submitting_generation(self):
+        self.handler.flow_client.upload_image = AsyncMock(side_effect=[
+            'first-media', RuntimeError('参考图上传失败：curl: (28) timed out'),
+        ])
+        model = {'model_name': 'GEM_PIX_2', 'aspect_ratio': 'IMAGE_ASPECT_RATIO_LANDSCAPE'}
+        with self.assertRaisesRegex(RuntimeError, '参考图上传失败'):
+            async for _ in self.handler._handle_image_generation(
+                self.token, 'project', model, 'test', [b'first', b'second'], False,
+                perf_trace=self.perf, response_state=self.state,
+            ):
+                pass
+        trace = self.perf['image_generation']
+        self.assertEqual(trace['upload_failed_image_index'], 2)
+        self.assertEqual(trace['uploaded_image_count'], 1)
+        self.assertGreaterEqual(trace['upload_images_ms'], 0)
+        self.assertNotIn('generate_api_ms', trace)
+        self.handler.flow_client.generate_image.assert_not_awaited()
+        self.handler.flow_client.upsample_image.assert_not_awaited()
+
 
 if __name__ == '__main__':
     unittest.main()
