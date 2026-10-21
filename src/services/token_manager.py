@@ -1050,7 +1050,9 @@ class TokenManager:
                 await self._record_cookie_refresh_failure(token, error)
                 return False
 
-    async def refresh_cookies(self, token_id: int) -> bool:
+    async def refresh_cookies(
+        self, token_id: int, *, expected_google_cookies: Optional[str] = None,
+    ) -> bool:
         """Explicitly renew current-Flow Cookies even when the AT marker is valid."""
         refresh_lock = await self._get_token_lock(
             self._refresh_locks, self._refresh_lock_guard, token_id
@@ -1059,6 +1061,14 @@ class TokenManager:
             token = await self.db.get_token(token_id)
             if not token:
                 return False
+            if expected_google_cookies is not None:
+                # An automatic recovery must not revive a disabled account or
+                # refresh over credentials saved while the failed RPC ran.
+                if not token.is_active:
+                    return False
+                self._clear_at_validation_cache(token_id)
+                if token.google_cookies != expected_google_cookies:
+                    return await self._do_refresh_at(token_id, token.st, token)
             if not (token.google_cookies or "").strip():
                 return await self._do_refresh_at(token_id, token.st, token)
             if await self._try_refresh_st(token_id, token):

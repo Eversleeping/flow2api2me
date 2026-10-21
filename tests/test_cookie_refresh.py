@@ -328,6 +328,44 @@ class TokenCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.login_mock.call_args.kwargs["proxy"], "http://127.0.0.1:7890"
         )
 
+    async def test_rejected_cookie_refresh_ignores_recent_validation_cache(self):
+        self.manager._mark_at_valid(self.token_id)
+        self.assertTrue(await self.manager.refresh_cookies(
+            self.token_id, expected_google_cookies=COOKIES,
+        ))
+        self.login_mock.assert_awaited_once()
+        latest = await self.db.get_token(self.token_id)
+        self.assertEqual(latest.google_cookies, NEW_COOKIES)
+
+    async def test_concurrent_rejected_cookie_refresh_reuses_updated_credentials(self):
+        results = await asyncio.gather(*(
+            self.manager.refresh_cookies(
+                self.token_id, expected_google_cookies=COOKIES,
+            ) for _ in range(3)
+        ))
+        self.assertEqual(results, [True, True, True])
+        self.login_mock.assert_awaited_once()
+        latest = await self.db.get_token(self.token_id)
+        self.assertEqual(latest.google_cookies, NEW_COOKIES)
+
+    async def test_rejected_cookie_refresh_validates_concurrently_saved_credentials(self):
+        await self.db.update_token(self.token_id, google_cookies=NEW_COOKIES)
+        self.assertTrue(await self.manager.refresh_cookies(
+            self.token_id, expected_google_cookies=COOKIES,
+        ))
+        self.login_mock.assert_not_awaited()
+        self.assertEqual(
+            self.flow.st_to_at.await_args.kwargs["google_cookies"], NEW_COOKIES,
+        )
+
+    async def test_rejected_cookie_refresh_does_not_revive_disabled_account(self):
+        await self.db.update_token(self.token_id, is_active=False)
+        self.assertFalse(await self.manager.refresh_cookies(
+            self.token_id, expected_google_cookies=COOKIES,
+        ))
+        self.login_mock.assert_not_awaited()
+        self.assertFalse((await self.db.get_token(self.token_id)).is_active)
+
     async def test_rpc_rejection_does_not_commit_candidate(self):
         self.flow.st_to_at.side_effect = RuntimeError("rpc=nzlxg, code=401")
         token = await self.db.get_token(self.token_id)

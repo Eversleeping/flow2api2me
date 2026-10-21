@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..core.logger import debug_logger
 from .browser_cookie_utils import validate_flow_cookie_storage
+from .flow_frontend import FlowAuthenticationError
 
 class CurrentFlowClientMixin:
     FRONTEND_ACCESS_TOKEN = "flow-frontend-cookie"
@@ -294,8 +295,11 @@ class CurrentFlowClientMixin:
         # Upload retries never resubmit the paid image generation RPC. Acquire a
         # fresh action token on every attempt; recover before clearing its context.
         max_retries = max(1, int(self._get_runtime_config().flow_max_retries or 1))
+        credentials_refreshed = False
         for retry_attempt in range(max_retries):
             browser_id = None
+            authentication_error = None
+            upload_cookies = ""
             try:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     normalized_project_id,
@@ -310,6 +314,15 @@ class CurrentFlowClientMixin:
                 context = self._frontend_project_context(
                     normalized_project_id,
                     recaptcha_token,
+                )
+                # Solving CAPTCHA can wake/refresh the browser. Read the saved
+                # credentials afterwards instead of using the caller's snapshot.
+                upload_cookies = await self._resolve_flow_frontend_cookie_storage(
+                    google_cookies=(
+                        None if token_id is not None and self.db is not None
+                        else google_cookies
+                    ),
+                    token_id=token_id,
                 )
                 payload = await self._current_rpc(
                     rpc_id="maseQ",
@@ -327,7 +340,7 @@ class CurrentFlowClientMixin:
                         str(uuid.uuid4()).upper(),
                         str(uuid.uuid4()).upper(),
                     ],
-                    google_cookies=google_cookies,
+                    google_cookies=upload_cookies,
                     token_id=token_id,
                     project_id=normalized_project_id,
                     timeout=max(self._get_control_plane_timeout(), 90),
@@ -345,14 +358,48 @@ class CurrentFlowClientMixin:
                     raise RuntimeError("Flow frontend upload response missing mediaId")
                 return media_id
             except Exception as error:
-                should_retry = await self._handle_retryable_generation_error(
-                    error, retry_attempt, max_retries, browser_id,
-                    normalized_project_id, "Reference image upload",
-                )
-                if not should_retry or retry_attempt >= max_retries - 1:
-                    raise RuntimeError(f"参考图上传失败：{error}") from error
+                if isinstance(error, FlowAuthenticationError):
+                    await self._notify_browser_captcha_error(
+                        browser_id=browser_id,
+                        project_id=normalized_project_id,
+                        error_reason="Flow 登录认证失败",
+                        error_message=str(error),
+                    )
+                    if (
+                        credentials_refreshed
+                        or retry_attempt >= max_retries - 1
+                        or token_id is None
+                        or self.db is None
+                        or not callable(getattr(self, "_credential_refresh", None))
+                    ):
+                        raise RuntimeError(f"参考图上传失败：{error}") from error
+                    authentication_error = error
+                else:
+                    should_retry = await self._handle_retryable_generation_error(
+                        error, retry_attempt, max_retries, browser_id,
+                        normalized_project_id, "Reference image upload",
+                    )
+                    if not should_retry or retry_attempt >= max_retries - 1:
+                        raise RuntimeError(f"参考图上传失败：{error}") from error
             finally:
                 await self._notify_browser_captcha_request_finished(browser_id)
+            if authentication_error is not None:
+                # Release the failed CAPTCHA lease before credential recovery
+                # needs the same account browser, then obtain a fresh solve.
+                credentials_refreshed = True
+                try:
+                    refreshed = await self._credential_refresh(
+                        token_id, expected_google_cookies=upload_cookies,
+                    )
+                except Exception as refresh_error:
+                    raise RuntimeError(
+                        f"参考图上传失败：{authentication_error}；"
+                        f"自动刷新凭证失败：{refresh_error}"
+                    ) from authentication_error
+                if not refreshed:
+                    raise RuntimeError(
+                        f"参考图上传失败：{authentication_error}；自动刷新凭证失败"
+                    ) from authentication_error
 
     async def generate_image(
         self,

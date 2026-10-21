@@ -13,6 +13,10 @@ from ..core.logger import debug_logger
 from .browser_cookie_utils import serialize_cookie_header_for_url
 
 
+class FlowAuthenticationError(RuntimeError):
+    """Flow explicitly rejected the Google session used by this request."""
+
+
 class FlowFrontendMixin:
     """Frontend RPC helpers shared by project and media generation flows."""
 
@@ -104,7 +108,7 @@ class FlowFrontendMixin:
                         code = item[6]
                     code = code if code is not None else "unknown"
                     if str(code) == "401":
-                        raise RuntimeError(
+                        raise FlowAuthenticationError(
                             "Flow 登录认证失败：Google Cookie 已失效、不完整，或来自不同账号 "
                             f"(rpc={rpc_id}, code=401)"
                         )
@@ -652,7 +656,7 @@ class FlowFrontendMixin:
         if response.status_code in {401, 403} or (
             response_host and response_host != "flow.google.com"
         ):
-            raise RuntimeError(
+            raise FlowAuthenticationError(
                 "Flow 登录认证失败：Google Cookie 已失效、不完整，或登录态被重定向 "
                 f"(code={response.status_code})"
             )

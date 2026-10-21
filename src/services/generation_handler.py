@@ -1479,7 +1479,6 @@ class GenerationHandler:
                     getattr(token, "st", ""),
                     media_lookup_id,
                     media_url_type="MEDIA_URL_TYPE_FULL_MEDIA",
-                    google_cookies=getattr(token, "google_cookies", None),
                     token_id=getattr(token, "id", None),
                     project_id=project_id,
                 )
@@ -2081,6 +2080,8 @@ class GenerationHandler:
             image_trace = perf_trace.setdefault("image_generation", {})
             image_trace["input_image_count"] = len(images) if images else 0
 
+        # Bound RPCs resolve Cookies by token_id so upload recovery and background
+        # refreshes also take effect for generation and upscaling in this request.
         # 不在本地等待图片硬并发槽位；请求一到就直接向上游提交。
         normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
 
@@ -2121,7 +2122,6 @@ class GenerationHandler:
                             model_config["aspect_ratio"],
                             project_id=project_id,
                             token_id=token.id,
-                            google_cookies=getattr(token, "google_cookies", None),
                         )
                     except Exception:
                         if image_trace is not None:
@@ -2180,7 +2180,6 @@ class GenerationHandler:
                 token_id=token.id,
                 token_image_concurrency=token.image_concurrency,
                 progress_callback=_image_progress_callback,
-                google_cookies=getattr(token, "google_cookies", None),
             )
             if image_trace is not None:
                 image_trace["generate_api_ms"] = int(
@@ -2259,7 +2258,6 @@ class GenerationHandler:
                             user_paygate_tier=normalized_tier,
                             session_id=generation_session_id,
                             token_id=token.id,
-                            google_cookies=getattr(token, "google_cookies", None),
                         )
                         attempt_trace["duration_ms"] = int(
                             (time.time() - attempt_started_at) * 1000
@@ -2657,7 +2655,6 @@ class GenerationHandler:
                         model_config["aspect_ratio"],
                         project_id=project_id,
                         token_id=token.id,
-                        google_cookies=getattr(token, "google_cookies", None),
                     )
                     debug_logger.log_info(f"[I2V] 仅上传首帧: {start_media_id}")
 
@@ -2671,7 +2668,6 @@ class GenerationHandler:
                         model_config["aspect_ratio"],
                         project_id=project_id,
                         token_id=token.id,
-                        google_cookies=getattr(token, "google_cookies", None),
                     )
                     end_media_id = await self.flow_client.upload_image(
                         token.at,
@@ -2679,7 +2675,6 @@ class GenerationHandler:
                         model_config["aspect_ratio"],
                         project_id=project_id,
                         token_id=token.id,
-                        google_cookies=getattr(token, "google_cookies", None),
                     )
                     debug_logger.log_info(
                         f"[I2V] 上传首尾帧: {start_media_id}, {end_media_id}"
@@ -2699,7 +2694,6 @@ class GenerationHandler:
                         model_config["aspect_ratio"],
                         project_id=project_id,
                         token_id=token.id,
-                        google_cookies=getattr(token, "google_cookies", None),
                     )
                     reference_images.append(
                         {
@@ -2725,7 +2719,6 @@ class GenerationHandler:
                         model_config["aspect_ratio"],
                         project_id=project_id,
                         token_id=token.id,
-                        google_cookies=getattr(token, "google_cookies", None),
                     )
                     reference_images.append(
                         {
@@ -2758,7 +2751,6 @@ class GenerationHandler:
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
-                        google_cookies=getattr(token, "google_cookies", None),
                     )
                 else:
                     # 只有首帧 - 需要去掉 model_key 中的 _fl
@@ -2781,7 +2773,6 @@ class GenerationHandler:
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
-                        google_cookies=getattr(token, "google_cookies", None),
                     )
 
             # R2V: 多图生成
@@ -2796,7 +2787,6 @@ class GenerationHandler:
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
-                    google_cookies=getattr(token, "google_cookies", None),
                 )
 
             # Omni: 有图走 Reference Images 直连链路，无图走纯文本链路
@@ -2813,7 +2803,6 @@ class GenerationHandler:
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
-                    google_cookies=getattr(token, "google_cookies", None),
                 )
 
             # Extend: 视频续写
@@ -2855,7 +2844,6 @@ class GenerationHandler:
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
-                    google_cookies=getattr(token, "google_cookies", None),
                 )
             if video_trace is not None:
                 video_trace["submit_generation_ms"] = int(
@@ -3040,7 +3028,6 @@ class GenerationHandler:
                         token.at,
                         operations,
                         token_id=token.id,
-                        google_cookies=getattr(token, "google_cookies", None),
                     ),
                     timeout=remaining,
                 )
@@ -3109,9 +3096,6 @@ class GenerationHandler:
                                     token.at,
                                     media_name_for_fetch,
                                     token_id=token.id,
-                                    google_cookies=getattr(
-                                        token, "google_cookies", None
-                                    ),
                                     project_id=project_id,
                                 )
                                 encoded_video = media_result.get("video", {}).get(
@@ -3174,7 +3158,6 @@ class GenerationHandler:
                                 user_paygate_tier=normalized_tier,
                                 token_id=token.id,
                                 token_video_concurrency=token.video_concurrency,
-                                google_cookies=getattr(token, "google_cookies", None),
                             )
                             
                             upsample_operations = upsample_result.get("operations", [])

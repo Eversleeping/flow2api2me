@@ -264,6 +264,7 @@ proxy_manager = ProxyManager(db)
 flow_client = FlowClient(proxy_manager, db)
 token_manager = TokenManager(db, flow_client)
 flow_client._browser_session_recovery = token_manager.restore_browser_login
+flow_client._credential_refresh = token_manager.refresh_cookies
 concurrency_manager = ConcurrencyManager()
 load_balancer = LoadBalancer(token_manager, concurrency_manager)
 generation_handler = GenerationHandler(
