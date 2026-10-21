@@ -1,5 +1,17 @@
 flow.maomi.xin {
-	reverse_proxy 127.0.0.1:38000 {
-		flush_interval -1
+	# Redeem a short-lived Pic admin ticket and set a host-only Flow session cookie.
+	handle /pic-sso {
+		rewrite * /api/admin/flow-session
+		reverse_proxy 127.0.0.1:5050 {
+			header_down -X-Frame-Options
+			header_down Content-Security-Policy "frame-ancestors 'self' https://pic.maomi.xin"
+		}
+	}
+	handle {
+		reverse_proxy 127.0.0.1:38000 {
+			flush_interval -1
+			header_down -X-Frame-Options
+			header_down Content-Security-Policy "frame-ancestors 'self' https://pic.maomi.xin"
+		}
 	}
 }

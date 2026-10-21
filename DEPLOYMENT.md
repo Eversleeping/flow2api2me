@@ -185,3 +185,19 @@ Chromium 实测确认：注册跳转初始化脚本前必须启用 CDP Page；�
 Google 要求密码或二次验证时仍需账号本人操作；保留浏览器资料不能保证 Google 会话永不失效。
 本次部署前数据库备份为 `data/backups/flow-before-interactive-login-20261018.sqlite3`。
 Caddy 修改前备份为 `/etc/caddy/Caddyfile.pre-flow2api2me-20261018`。
+
+## 2026-10-21 接入造境后台
+
+造境的 `/admin#flow` 嵌入本服务 `/manage`，仍使用 Flow 原管理账号及独立会话。
+`deploy/flow.caddy` 与 `/etc/caddy/Caddyfile` 已将公网响应的嵌入策略设为
+`Content-Security-Policy: frame-ancestors 'self' https://pic.maomi.xin`，同时移除冲突的
+`X-Frame-Options: DENY`；只允许自身与指定造境域名嵌入，不开放任意站点。
+应用内原策略与登录鉴权保持，Caddy 已校验并平滑重载，无需重启 Flow 容器。
+
+### 自动登录补充
+
+造境管理员进入集成入口时无需再次输入 Flow 密码。Caddy 的 `/pic-sso` 精确路由转发到
+`127.0.0.1:5050/api/admin/flow-session`；造境验证 30 秒一次性凭据及原管理员会话后，
+只读本机 Flow 数据库的当前管理凭据，经回环 `/api/admin/login` 创建 Flow 会话，
+设置本域 HttpOnly / Secure Cookie 后跳转 `/manage`。密码不放入浏览器或跳转 URL。
+原 Flow 登录入口和接口鉴权保留；跨域嵌入白名单保持。恢复部署时需同时保留此 Caddy 路由。
