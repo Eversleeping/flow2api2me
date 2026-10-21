@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from src.services.flow_client import FlowClient
+from src.services.generation_handler import GenerationHandler
 
 
 class ImageUpscaleRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -22,7 +23,7 @@ class ImageUpscaleRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 "token_id": 7, "project_id": "project",
                 "slot_id": "b0-slot-1", "issued_at": 100.0,
             })
-            return "captcha", None
+            return f"captcha-{self.client._get_recaptcha_token.await_count}", None
 
         async def report(**kwargs):
             self.events.append("recover")
@@ -74,6 +75,47 @@ class ImageUpscaleRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client._get_retry_reason(
             "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC"
         ), "Google 风控拒绝")
+
+    async def test_connect_failure_retries_upscale_with_fresh_captcha(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.flow_client = self.client
+        handler._update_request_log_progress = AsyncMock()
+        media = {"name": "media", "image": {"generatedImage": {
+            "fifeUrl": "https://flow-content.google/image/original",
+        }}}
+        self.client.generate_image = AsyncMock(return_value=({"media": [media]}, "session", {}))
+        self.client._current_rpc.side_effect = [
+            RuntimeError("Failed to perform, curl: (7) Failed to connect to flow.google.com port 443: Could not connect to server"),
+            ["https://flow-content.google/image/upscaled"],
+        ]
+        token = types.SimpleNamespace(id=7, at="access", image_concurrency=1,
+                                      user_paygate_tier=None)
+        state, perf = {}, {}
+        with (
+            patch("src.services.browser_captcha_personal.BrowserCaptchaService.get_instance",
+                  AsyncMock(return_value=self.service)),
+            patch("src.services.generation_handler.config", types.SimpleNamespace(
+                flow_max_retries=3, cache_enabled=False,
+            )),
+            patch("src.services.generation_handler.asyncio.sleep", AsyncMock()),
+        ):
+            chunks = [chunk async for chunk in handler._handle_image_generation(
+                token, "project", {
+                    "model_name": "GEM_PIX_2",
+                    "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+                    "upsample": "IMAGE_UPSAMPLE_RESOLUTION_2K",
+                }, "test", None, False, response_state=state, perf_trace=perf,
+            )]
+        self.assertTrue(chunks)
+        self.assertEqual(state["url"], "https://flow-content.google/image/upscaled")
+        self.assertEqual(
+            [call.kwargs["argument"][2][10][0]
+             for call in self.client._current_rpc.await_args_list],
+            ["captcha-1", "captcha-2"],
+        )
+        self.assertEqual(perf["image_generation"]["upsample_attempts"][0]["retry_reason"],
+                         "网络/TLS错误")
+        self.client.generate_image.assert_awaited_once()
 
 
 if __name__ == "__main__":

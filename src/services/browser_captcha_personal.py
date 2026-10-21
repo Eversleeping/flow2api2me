@@ -1567,6 +1567,7 @@ class ResidentTabInfo:
         self.last_harvest_session_id: Optional[str] = None
         self.last_solve_used_native_harvest = False
         self.prefer_native_harvest = False
+        self.last_flow_error_issued_at = 0.0
         self.solve_lock = asyncio.Lock()  # 串行化同一标签页上的执行，降低并发冲突
         self.pending_assignment_count = 0  # 选中但尚未真正进入 solve_lock 的请求数
 
@@ -8603,7 +8604,9 @@ class BrowserCaptchaService:
                     )
                     self._forget_token_affinity_for_slot_locked(resolved_slot_id)
                     self._forget_project_affinity_for_slot_locked(resolved_slot_id)
-                    if resolved_slot_id:
+                    if resolved_slot_id and (
+                        old_resident is None or old_resident.token_id != token_id
+                    ):
                         self._resident_error_streaks.pop(resolved_slot_id, None)
                     self._sync_compat_resident_state()
 
@@ -10805,7 +10808,6 @@ class BrowserCaptchaService:
                     self._remember_token_affinity(
                         token_id, resolved_slot_id, resident_info
                     )
-                    self._resident_error_streaks.pop(resolved_slot_id, None)
                     debug_logger.log_warning(
                         f"[BrowserCaptcha] project_id={project_id}, slot={resolved_slot_id} 清理后已恢复 reCAPTCHA"
                     )
@@ -10881,7 +10883,6 @@ class BrowserCaptchaService:
                             self._remember_token_affinity(
                                 token_id, slot_id, resident_info
                             )
-                            self._resident_error_streaks.pop(slot_id, None)
                             debug_logger.log_warning(
                                 f"[BrowserCaptcha] project_id={project_id} 检测到最近已完成浏览器恢复，复用当前运行态 (slot={slot_id})"
                             )
@@ -10953,6 +10954,21 @@ class BrowserCaptchaService:
             )
         return True
 
+    async def report_flow_success(
+        self, project_id: str, *, token_id: int, slot_id: str, issued_at: float,
+    ):
+        """Reset upstream failures only after a matching RPC was accepted."""
+        async with self._resident_lock:
+            resident_info = self._resident_tabs.get(slot_id)
+            if (
+                resident_info is None
+                or resident_info.token_id != token_id
+                or resident_info.created_at > issued_at
+                or resident_info.last_flow_error_issued_at > issued_at
+            ):
+                return
+            self._resident_error_streaks.pop(slot_id, None)
+
     async def report_flow_error(
         self,
         project_id: str,
@@ -11006,6 +11022,11 @@ class BrowserCaptchaService:
 
         streak = self._resident_error_streaks.get(resolved_slot_id, 0) + 1
         self._resident_error_streaks[resolved_slot_id] = streak
+        if resident_info is not None:
+            resident_info.last_flow_error_issued_at = max(
+                resident_info.last_flow_error_issued_at,
+                float(issued_at) if issued_at is not None else time.time(),
+            )
         debug_logger.log_warning(
             f"[BrowserCaptcha] project_id={project_id}, slot={resolved_slot_id} 收到上游异常，streak={streak}, reason={error_reason}, detail={error_message[:200]}"
         )
@@ -12914,7 +12935,8 @@ class BrowserCaptchaService:
             project_id=project_id,
         )
         self._remember_project_affinity(project_id, slot_id, resident_info)
-        self._resident_error_streaks.pop(slot_id, None)
+        # Obtaining a token does not prove that Google will accept it. Keep
+        # upstream failures until report_flow_success receives the RPC result.
         self._mark_browser_health(True)
         resident_info.fingerprint = await self._refresh_last_fingerprint(
             resident_info.tab
@@ -13441,8 +13463,6 @@ class BrowserCaptchaService:
             legacy_token, legacy_session_id = await self._get_token_legacy(
                 project_id, action, token_id=token_id
             )
-            if legacy_token and slot_id:
-                self._resident_error_streaks.pop(slot_id, None)
             return finish_result(
                 legacy_token,
                 f"legacy:{legacy_session_id}"
@@ -16310,6 +16330,16 @@ class _PersonalBrowserPoolService:
             "issued_at": lease.created_at,
             "expires_at": lease.expires_at,
         }
+
+    async def report_flow_success(
+        self, project_id: str, *, token_id: int, slot_id: str, issued_at: float,
+    ):
+        await self._ensure_workers()
+        worker_index = self._parse_worker_index_from_slot_id(slot_id)
+        if worker_index is not None and 0 <= worker_index < len(self._workers):
+            await self._workers[worker_index].report_flow_success(
+                project_id, token_id=token_id, slot_id=slot_id, issued_at=issued_at,
+            )
 
     async def report_flow_error(
         self,

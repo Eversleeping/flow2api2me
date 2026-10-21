@@ -1030,6 +1030,7 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
         )
         self.service.browser = types.SimpleNamespace(stopped=False)
         self.service._initialized = True
+        self.service._resident_error_streaks["slot-1"] = 2
         self.service._mark_runtime_restart()
         self.service._probe_browser_runtime = AsyncMock(return_value=True)
         self.service._ensure_resident_tab = AsyncMock(
@@ -1044,6 +1045,7 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.service._restart_browser_for_project_unlocked.assert_not_awaited()
         self.service._ensure_resident_tab.assert_awaited_once()
+        self.assertEqual(self.service._resident_error_streaks["slot-1"], 2)
 
     async def test_wait_for_recaptcha_raises_on_runtime_disconnect(self):
         tab = _ClosableFakeTab()

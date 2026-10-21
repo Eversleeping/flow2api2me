@@ -96,6 +96,15 @@ class ImageUpscaleFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assert_fallback(content, '缺少 media ID')
         self.handler.flow_client.upsample_image.assert_not_awaited()
 
+    async def test_connect_failures_obey_retry_limit_and_keep_original(self):
+        error = 'Failed to perform, curl: (7) Could not connect to server'
+        self.handler.flow_client.upsample_image.side_effect = RuntimeError(error)
+        with patch('src.services.generation_handler.asyncio.sleep', new_callable=AsyncMock):
+            content = await self.run_generation()
+        self.assert_fallback(content, error)
+        self.assertEqual(self.handler.flow_client.upsample_image.await_count, 2)
+        self.handler.flow_client.generate_image.assert_awaited_once()
+
     async def test_frontend_upscaled_url_is_not_reported_as_fallback(self):
         self.handler.flow_client.upsample_image.return_value = 'https://example.com/2k.jpg'
         content = await self.run_generation(stream=True)

@@ -1029,6 +1029,10 @@ class _FlowClientBase(FlowFrontendMixin):
         return any(
             keyword in error_lower
             for keyword in [
+            "curl: (7)",
+            "failed to connect to",
+            "could not connect to server",
+            "couldn't connect to server",
             "curl: (35)",
             "curl: (52)",
             "curl: (56)",
@@ -4735,6 +4739,31 @@ class _FlowClientBase(FlowFrontendMixin):
             else:
                 merged[key] = value
         self._set_request_fingerprint(merged if merged else None)
+
+    async def _notify_browser_captcha_success(
+        self, *, project_id: Optional[str], token_id: Optional[int],
+    ):
+        """A successful protected RPC, rather than a solve, resets failures."""
+        context = self._get_captcha_request_context()
+        if (
+            context.get("method") != "personal"
+            or project_id is None or token_id is None
+            or context.get("project_id") != project_id
+            or context.get("token_id") != token_id
+            or not context.get("slot_id")
+            or context.get("issued_at") is None
+        ):
+            return
+        try:
+            from .browser_captcha_personal import BrowserCaptchaService
+
+            service = await BrowserCaptchaService.get_instance(self.db)
+            await service.report_flow_success(
+                project_id, token_id=token_id, slot_id=context["slot_id"],
+                issued_at=context["issued_at"],
+            )
+        except Exception as error:
+            debug_logger.log_warning(f"[reCAPTCHA Personal] 上报成功结果失败: {error}")
 
     async def _notify_browser_captcha_error(
         self,

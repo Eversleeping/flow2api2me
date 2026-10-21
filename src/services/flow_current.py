@@ -109,7 +109,7 @@ class CurrentFlowClientMixin:
             google_cookies=google_cookies,
             token_id=token_id,
         )
-        return await self._call_flow_frontend_rpc(
+        payload = await self._call_flow_frontend_rpc(
             rpc_id=rpc_id,
             argument=argument,
             cookie_header="",
@@ -118,6 +118,10 @@ class CurrentFlowClientMixin:
             source_path=source_path,
             cookie_storage=cookie_storage,
         )
+        await self._notify_browser_captcha_success(
+            project_id=project_id, token_id=token_id,
+        )
+        return payload
 
     async def st_to_at(
         self,
